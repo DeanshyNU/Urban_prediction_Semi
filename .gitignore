@@ -1,0 +1,87 @@
+# Python 缓存和编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 模型文件和权重
+*.pt
+*.pth
+*.pkl
+*.h5
+*.ckpt
+*.safetensors
+
+# 训练输出目录（带时间戳的）
+semi_supervised_*/
+supervised_*/
+supervised baseline/
+Fixmatch_ESTnet/
+old/
+
+# 日志和输出文件
+*.log
+*.out
+*.err
+mylog.txt
+
+# W&B 相关
+wandb/
+.wandb/
+
+# 数据文件（通常很大）
+*.npy
+*.npz
+*.mat
+*.hdf5
+*.h5
+
+# 图片文件（训练历史图，通常不需要版本控制）
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+
+# Jupyter Notebook 检查点
+.ipynb_checkpoints
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 临时文件和测试输出
+*.tmp
+*.temp
+test_output/
+*.cache
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 大型数据集目录（如果有）
+data/
+datasets/
+*.csv
+*.tsv
+
+# SLURM 输出文件
+slurm-*.out
+slurm-*.err
+
+# 配置文件中的敏感信息（如果有）
+config.ini
+secrets.yaml
+.env

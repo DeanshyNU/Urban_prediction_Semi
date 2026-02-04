@@ -1,0 +1,143 @@
+"""
+数据预处理模块
+包含数据加载、清洗、转换等预处理功能
+"""
+import numpy as np
+import mat73
+from utils import MinMax, MinMax_first_dim, add_auxiliary_variables
+
+
+def merge_wind_components(data):
+    """
+    合并X和Y方向的风速为单一的风速大小特征
+    """
+    WRFMat = data['WRFMat'].copy()  # 复制以免修改原始数据
+    
+    # 第6个变量是X方向风速(索引45-53)，第7个变量是Y方向风速(索引54-62)
+    # 每个变量有9个网格点
+    wind_x = WRFMat[:, 45:54, :]  # X方向风速
+    wind_y = WRFMat[:, 54:63, :]  # Y方向风速
+    
+    # 计算风速大小(矢量模)
+    wind_magnitude = np.sqrt(wind_x**2 + wind_y**2)
+    
+    # 用风速大小替换X方向风速
+    WRFMat[:, 45:54, :] = wind_magnitude
+    
+    # 创建新的WRFMat，只保留前54个特征(删除Y方向风速)
+    new_WRFMat = WRFMat[:, :54, :]
+    
+    # 更新数据
+    data['WRFMat'] = new_WRFMat
+    return data
+
+
+def reduce_stations(unlabeled_data, target_station_count=500, seed=42):
+    """
+    削减站点数量，随机选择指定数量的站点
+    
+    Args:
+        unlabeled_data: 无标签数据字典
+        target_station_count: 目标站点数量
+        seed: 随机种子，确保可复现性
+    """
+    original_station_count = unlabeled_data['Map'].shape[0]
+
+    # 确保目标站点数量小于或等于原始站点数量
+    assert target_station_count <= original_station_count, "目标站点数量不能大于原始站点数量"
+
+    # 设置随机种子，确保可复现性
+    rng = np.random.default_rng(seed)
+    selected_indices = rng.choice(
+        np.arange(original_station_count),
+        size=target_station_count,
+        replace=False
+    )
+
+    # 创建新的字典用于存储削减后的数据
+    reduced_data = {}
+
+    # 遍历字典中的每个变量，按索引提取数据
+    for key, value in unlabeled_data.items():
+        if key == 'CLMSMat':
+            # CLMSMat: (6624, 3, 2000)
+            reduced_data[key] = value[:, :, selected_indices]
+        elif key == 'WRFMat':
+            # WRFMat: (6624, 63, 2000)
+            reduced_data[key] = value[:, :, selected_indices]
+        elif key == 'auxiliary_variables':
+            # auxiliary_variables: (6624, 2000, 4)
+            reduced_data[key] = value[:, selected_indices, :]
+        elif key in ['Map', 'NodeLocation', 'UrbanFeature', 'SimilarityMat']:
+            # Map, NodeLocation: (2000, 2)
+            # UrbanFeature: (2000, 17)
+            # SimilarityMat: (2000, 10)
+            reduced_data[key] = value[selected_indices]
+        elif key == 'UrbanFeatureMat':
+            # UrbanFeatureMat: (401, 401, 7, 2000)
+            reduced_data[key] = value[:, :, :, selected_indices]
+        else:
+            # 未识别的变量直接保留
+            reduced_data[key] = value
+
+    return reduced_data
+
+
+def preprocess_unlabeled_data(unlabeled_file, target_station_count=500, nTimesteps=6624, seed=42):
+    """
+    完整的无标签数据预处理流程
+    
+    Args:
+        unlabeled_file: 无标签数据文件路径
+        target_station_count: 目标站点数量
+        nTimesteps: 时间步数
+        seed: 随机种子，用于站点选择的可复现性
+    
+    Returns:
+        处理后的数据字典
+    """
+    # 1. 加载数据
+    print(f"正在加载数据: {unlabeled_file}")
+    unlabeled_data = mat73.loadmat(unlabeled_file)
+    
+    # 2. 合并风速分量
+    print("正在合并风速分量...")
+    unlabeled_data = merge_wind_components(unlabeled_data)
+    
+    # 3. 统一数据类型为float64（提前转换，确保后续操作在统一类型上进行）
+    print("正在统一数据类型...")
+    if 'CLMSMat' in unlabeled_data:
+        unlabeled_data['CLMSMat'] = np.array(unlabeled_data['CLMSMat'], dtype=np.float64)
+    if 'WRFMat' in unlabeled_data:
+        unlabeled_data['WRFMat'] = np.array(unlabeled_data['WRFMat'], dtype=np.float64)
+    if 'UrbanFeature' in unlabeled_data:
+        unlabeled_data['UrbanFeature'] = np.array(unlabeled_data['UrbanFeature'], dtype=np.float64)
+    
+    # 4. 削减站点
+    print(f"正在削减站点数量至 {target_station_count}...")
+    unlabeled_data = reduce_stations(unlabeled_data, target_station_count=target_station_count, seed=seed)
+    
+    # 5. 处理NaN值
+    if 'UrbanFeatureMat' in unlabeled_data:
+        print("正在处理 'UrbanFeatureMat'...")
+        urban_feature_mat = unlabeled_data['UrbanFeatureMat']
+        unlabeled_data['UrbanFeatureMat'] = np.nan_to_num(urban_feature_mat, nan=0.0)
+        print("'UrbanFeatureMat' 中的 NaN 值已全部替换为 0")
+    else:
+        print("未找到 'UrbanFeatureMat' 变量！")
+    
+    # 6. 添加辅助变量
+    print("正在添加辅助变量...")
+    unlabeled_data["auxiliary_variables"] = add_auxiliary_variables(
+        unlabeled_data, nStations=target_station_count, nTimesteps=nTimesteps
+    )
+    
+    # 7. 归一化
+    print("正在归一化数据...")
+    unlabeled_data['CLMSMat'], _, _ = MinMax(unlabeled_data['CLMSMat'])
+    unlabeled_data['WRFMat'], _, _ = MinMax(unlabeled_data['WRFMat'])
+    unlabeled_data['UrbanFeature'], _, _ = MinMax_first_dim(unlabeled_data['UrbanFeature'])
+    
+    print("数据预处理完成！")
+    return unlabeled_data
+
