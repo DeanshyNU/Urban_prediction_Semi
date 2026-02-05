@@ -23,7 +23,7 @@ def main():
             'window' : 2,
             'poolSize': 12,
             'batchSize': 128,  # 降低batch_size避免OOM
-            'thres':    0.1,  # 使用与监督学习相同的阈值
+            'thres':    0.4,  # 提高阈值以降低边密度（从87%降到约20-30%）
             'geoFeatures':  'full',
             }
     n_unlabeled = 200  # 无标签站点数
@@ -53,13 +53,8 @@ def main():
     labeled_indices = np.where(label_mask)[0]
     unlabeled_indices = np.where(~label_mask)[0]
     
-    # 统计有标签↔无标签之间的边
-    cross_edges = 0
-    for i in labeled_indices:
-        for j in unlabeled_indices:
-            if AdjMatrix[i, j] > 0 or AdjMatrix[j, i] > 0:
-                cross_edges += 1
-                break  # 每个有标签节点只统计一次
+    # 统计有标签↔无标签之间的边（实际边数）
+    cross_edges = np.sum(AdjMatrix[np.ix_(labeled_indices, unlabeled_indices)] > 0)
     
     # 统计无标签↔无标签之间的边
     unlabeled_to_unlabeled = 0
@@ -172,6 +167,8 @@ def main():
         print(f"  学习率衰减: 0.9992", file=f)
         print(f"  优化器: Adam", file=f)
         print(f"  损失函数: HuberLoss", file=f)
+        print(f"  地理嵌入: 无标签数据使用有标签归一化参数后 clip 到 [0,1]", file=f)
+        print(f"  梯度裁剪: max_norm=1.0", file=f)
         print("", file=f)
         print("数据集信息:", file=f)
         print(f"  总节点数: {metadata['nNodes']}", file=f)

@@ -148,6 +148,8 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes,nNodes_labeled):
         
         _loss = lossFn(_yHat_labeled, _y_labeled)
         _loss.backward(retain_graph=False)
+        # ✅ 添加梯度裁剪，防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         opt.step()
         opt.zero_grad(set_to_none=True)
         _LOSS += _loss

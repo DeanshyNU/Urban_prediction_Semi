@@ -115,10 +115,12 @@ def genGeoFeatures_unlabeled(unlabeled_data, geoMethod='average', poolSize=15, n
         
         _norm = np.transpose(_raw, (0, 1, 3, 2))
         _norm = (_norm - _off) / _scl
+        # ✅ 添加clip，限制到[0,1]范围
+        _norm = np.clip(_norm, 0.0, 1.0)
         
         # 归一化后统计
         _norm_flat = np.transpose(_norm, (2, 3, 0, 1)).reshape(_nStations, -1)
-        print(f"  归一化后统计: min={np.min(_norm_flat):.6f}, max={np.max(_norm_flat):.6f}, mean={np.mean(_norm_flat):.6f}")
+        print(f"  归一化后统计（clip后）: min={np.min(_norm_flat):.6f}, max={np.max(_norm_flat):.6f}, mean={np.mean(_norm_flat):.6f}")
         
         _geoFeatures = np.transpose(_norm, (2, 3, 0, 1))
         _geoFeatures = torch.FloatTensor(_geoFeatures)
