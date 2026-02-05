@@ -12,7 +12,7 @@ from data_preprocessing import preprocess_unlabeled_data
 from data_generation import dataGen_ESTnet, dataGen_unlabeled_ESTnet
 from data_augmentation import TransformFixMatch
 from models import GNN
-from Fixmatch_training import train_fixmatch, test_fixmatch, loadCheckPoint
+from Fixmatch_training import train_fixmatch_no_uq, test_fixmatch, loadCheckPoint
 from utils import plotHist
 
 # 设备配置
@@ -56,7 +56,7 @@ def main():
     ##----------------------数据增强----------------------
     print("步骤2: 对无标签数据应用数据增强")
     # 增强强度：weak_m=1.5（温和），strong_m=4.5（明显更强，保持约1:3比例）
-    augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5)
+    augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42)
     weak_augmented_data, strong_augmented_data = augmenter(unlabeled_data)
     
     weak_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, weak_augmented_data, labeled=False, path=DATA_PATH)
@@ -103,17 +103,17 @@ def main():
 
     # 在模型初始化后记录配置
     with open(f'./{model_path}_log', 'a') as f:
-        print("模型配置:", file=f)
-        print("  数据增强: weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5（UrbanFeature不增强）", file=f)
-        print("  UQ参数: epsilon=1e-5, temperature=0.5, n_augments=5", file=f)
-        print("  权重处理: 标准归一化，无权重限幅", file=f)
-        print("  优化: lr=1e-3, 无weight_decay, 无梯度裁剪", file=f)
-        print("  无标签损失: lambda_U=10", file=f)
-        print("  Dropout: 启用", file=f)
+        print("="*60, file=f)
+        print("FixMatch配置（标准版本，无UQ）:", file=f)
+        print("  方法: FixMatch（弱-强一致性 + 伪标签）", file=f)
+        print("  数据增强: weak_m=1.5, strong_m=4.5（UrbanFeature不增强）", file=f)
+        print("  伪标签: 1次弱增强推理，无置信度过滤", file=f)
+        print("  模型: GNN (SAGEConv)", file=f)
+        print("  特征: 统一特征向量（动态+静态合并）", file=f)
+        print("  优化: lr=1e-3, 学习率衰减=0.9992", file=f)
+        print("  无标签损失权重: lambda_U=10（带ramp-up）", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
-        print("  ESTNet架构（静态和动态特征分离）", file=f)
-        print("  新添加的改动：threshold=0.4; kNN保底稀疏化(k=8); 统一图结构; 未来时间窗口", file=f)
-        print("----------------------------------------", file=f)
+        print("="*60, file=f)
 
     ##----------------------训练----------------------
     print("步骤4: 开始训练")
@@ -125,9 +125,9 @@ def main():
     
     for epoch in range(EPOCH, nEpoch):
         ramp = rampup_factor(epoch, 30)
-        # 使用FixMatch训练
-        trainLoss, trainRMSE, _, _ = train_fixmatch(
-            trainLoader, weak_loader, strong_loader, model, lossFn, loss_unlabel_fn, opt, scheduler, device, metadata['nNodes'], lambda_U=10 * ramp  # V2: 使用ramp-up
+        # 使用FixMatch训练（标准版本，无UQ）
+        trainLoss, trainRMSE, _, _ = train_fixmatch_no_uq(
+            trainLoader, weak_loader, strong_loader, model, lossFn, loss_unlabel_fn, opt, scheduler, device, metadata['nNodes'], lambda_U=10 * ramp
         )
         validLoss, validRMSE, _, _ = test_fixmatch(
             validLoader, model, lossFn, device, metadata['nNodes']

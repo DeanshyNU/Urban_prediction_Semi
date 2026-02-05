@@ -108,11 +108,11 @@ def plotHist(hist, modelName):
     _ax[0].semilogy(_trainLoss, label='Training')
     _ax[0].semilogy(_validLoss, label='Validation')
     _ax[0].set_title("Loss")
-    _ax[0].legend('upper right')
+    _ax[0].legend(loc='upper right')
     _ax[1].semilogy(_trainRMSE, label="Training")
     _ax[1].semilogy(_validRMSE, label="Validation")
     _ax[1].set_title("Station-wised Mean RMSE")
-    _ax[1].legend('upper right')
+    _ax[1].legend(loc='upper right')
     plt.savefig(f'./{modelName}_hist.png', dpi=200)
     plt.close()
 

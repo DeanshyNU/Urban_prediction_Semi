@@ -58,7 +58,7 @@ def main():
     print("步骤2: 对无标签数据应用数据增强（Mean Teacher）")
     # Mean Teacher只需要一次增强
     # 增强强度：weak_m=1.5（温和），strong_m=4.5（明显更强，保持约1:3比例）
-    augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5)
+    augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42)
     augmented_data, _ = augmenter(unlabeled_data)
 
     unlabeled_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, augmented_data, labeled=False, path=DATA_PATH)
@@ -121,9 +121,9 @@ def main():
         print("  优化: lr=1e-3, 学习率衰减=0.9992", file=f)
         print(f"  无标签损失权重: lambda_U（带ramp-up）", file=f)
         print("  EMA系数: alpha=0.999", file=f)
-        print("  Dropout: 启用", file=f)
+        print("  模型: GNN (SAGEConv)", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
-        print("  ESTNet架构（静态和动态特征分离）", file=f)
+        print("  特征: 统一特征向量（动态+静态合并）", file=f)
         print("="*60, file=f)
 
     ##----------------------训练----------------------

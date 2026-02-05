@@ -47,16 +47,17 @@ def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=
 def update_ema_variables(model, ema_model, alpha, global_step):
     """
     更新教师模型（EMA）的参数
- 
+
     参数:
         model: 学生模型
         ema_model: 教师模型（EMA）
-        alpha: EMA系数
-        global_step: 全局步数（用于调整alpha）
+        alpha: EMA系数（固定值，如0.999）
+        global_step: 全局步数（当前未使用，保留接口）
     """
-    # 使用全局步数调整alpha（可选）
-    alpha = min(1 - 1 / (global_step + 1), alpha)
- 
+    # 使用固定alpha（推荐方案A）
+    # 原因：动态调整alpha在global_step=0时会导致alpha=0，训练不稳定
+    # 固定alpha=0.999可以保持教师模型的稳定性
+    
     for ema_param, param in zip(ema_model.parameters(), model.parameters()):
         ema_param.data.mul_(alpha).add_(param.data, alpha=1 - alpha)
  
@@ -82,7 +83,7 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
         global_step: 当前全局步数
     """
     student_model.train()
-    teacher_model.train()  # 教师模型也设为train模式以保持dropout等的一致性
+    teacher_model.eval()  # 教师模型只用于推理，生成稳定的伪标签
  
     total_labeled_loss = 0
     total_consistency_loss = 0
