@@ -185,6 +185,15 @@ def dataGen(dataParam,path,nTrn=0.75,predMode=False,n_unlabeled=200):
     # 在使用前将UrbanFeatureMat中的NaN替换为0
     UrbanFeatureMat_unlabeled = np.nan_to_num(UrbanFeatureMat_unlabeled, nan=0.0)
     
+    # 归一化无标签数据的WRF和CLMS特征（与有标签数据范围一致）
+    print("\n正在归一化无标签数据的WRF和CLMS特征...")
+    print(f"  WRFMat归一化前: min={np.min(WRFMat_unlabeled):.6f}, max={np.max(WRFMat_unlabeled):.6f}, mean={np.mean(WRFMat_unlabeled):.6f}")
+    print(f"  CLMSMat归一化前: min={np.min(CLMSMat_unlabeled):.6f}, max={np.max(CLMSMat_unlabeled):.6f}, mean={np.mean(CLMSMat_unlabeled):.6f}")
+    WRFMat_unlabeled, _, _ = utils.MinMax(WRFMat_unlabeled)
+    CLMSMat_unlabeled, _, _ = utils.MinMax(CLMSMat_unlabeled)
+    print(f"  WRFMat归一化后: min={np.min(WRFMat_unlabeled):.6f}, max={np.max(WRFMat_unlabeled):.6f}, mean={np.mean(WRFMat_unlabeled):.6f}")
+    print(f"  CLMSMat归一化后: min={np.min(CLMSMat_unlabeled):.6f}, max={np.max(CLMSMat_unlabeled):.6f}, mean={np.mean(CLMSMat_unlabeled):.6f}")
+    
     # 为无标签数据生成地理特征
     # --------------------------加载有标签数据--------------------------
     print("正在加载有标签数据...")
@@ -457,7 +466,9 @@ def dataGen(dataParam,path,nTrn=0.75,predMode=False,n_unlabeled=200):
     _validLength = len(_dataset)-_trainLength  
     trainSet, validSet = torch.utils.data.random_split(_dataset,[_trainLength,_validLength],_generator)
     trainLoader = DataLoader(trainSet,batch_size=_batchSize,shuffle=not predMode) 
-    validLoader = DataLoader(validSet,batch_size=len(validSet),shuffle=False)
+    # 验证集使用与训练集相同的batch_size，避免OOM
+    valid_batch_size = min(_batchSize, len(validSet))  # 不超过验证集大小
+    validLoader = DataLoader(validSet,batch_size=valid_batch_size,shuffle=False)
 
     metadata = {
         'nNodes':    _nNodes_total,  # 总节点数268

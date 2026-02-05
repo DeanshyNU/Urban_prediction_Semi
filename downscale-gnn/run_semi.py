@@ -22,8 +22,8 @@ def main():
             'nCompPCA': 40,
             'window' : 2,
             'poolSize': 12,
-            'batchSize': 512,
-            'thres':    0.4,  # 使用与监督学习相同的阈值
+            'batchSize': 128,  # 降低batch_size避免OOM
+            'thres':    0.1,  # 使用与监督学习相同的阈值
             'geoFeatures':  'full',
             }
     n_unlabeled = 200  # 无标签站点数

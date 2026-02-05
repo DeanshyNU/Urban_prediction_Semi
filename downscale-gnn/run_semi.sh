@@ -14,6 +14,6 @@
 source /home/hhz6461/anaconda3/etc/profile.d/conda.sh
 conda activate fixmatch             # 激活你的 Conda 环境
 
-# 运行 Python 脚本
-python run_semi.py
+# 运行 Python 脚本（-u 关闭 stdout 缓冲，调试信息会立即写入 .out）
+python -u run_semi.py
  
