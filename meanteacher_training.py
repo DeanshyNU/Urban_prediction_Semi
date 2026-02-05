@@ -96,21 +96,19 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
         opt.zero_grad(set_to_none=True)
  
         # 有标签损失计算（学生模型）
-        student_logits = student_model(batch.x_dynamic, batch.x_static, batch.edge_index, batch.edge_attr)
+        student_logits = student_model(batch.x, batch.edge_index, batch.edge_attr)
         labeled_loss = lossFn(student_logits, batch.y)
- 
+
         # 一致性损失计算：学生模型学习教师模型的预测
         with torch.no_grad():
             # 教师模型为无标签数据生成伪标签
             teacher_predictions = teacher_model(
-                unlabeled_batch.x_dynamic, unlabeled_batch.x_static,
-                unlabeled_batch.edge_index, unlabeled_batch.edge_attr
+                unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr
             )
- 
+
         # 学生模型对无标签数据的预测
         student_predictions = student_model(
-            unlabeled_batch.x_dynamic, unlabeled_batch.x_static,
-            unlabeled_batch.edge_index, unlabeled_batch.edge_attr
+            unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr
         )
  
         # 计算一致性损失
@@ -175,12 +173,12 @@ def test_meanteacher(loader, model, lossFn, device, nNodes):
  
     with torch.no_grad():
         for batch in loader:
-            if batch.x_dynamic is None or batch.y is None:
+            if batch.x is None or batch.y is None:
                 continue
- 
+
             batch = batch.to(device)
-            # 前向传播
-            logits = model(batch.x_dynamic, batch.x_static, batch.edge_index, batch.edge_attr)
+            # 前向传播 - 使用统一的特征
+            logits = model(batch.x, batch.edge_index, batch.edge_attr)
  
             # 确保输出和标签形状兼容
             logits = logits.reshape(-1, nNodes)

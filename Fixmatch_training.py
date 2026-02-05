@@ -65,15 +65,15 @@ def train_fixmatch(loader, weak_loader, strong_loader, model, lossFn, loss_unlab
         
         opt.zero_grad(set_to_none=True)
         
-        # 有标签损失计算 - 使用分离的静态和动态特征
-        logits = model(batch.x_dynamic, batch.x_static, batch.edge_index, batch.edge_attr)
+        # 有标签损失计算 - 使用统一的特征
+        logits = model(batch.x, batch.edge_index, batch.edge_attr)
         labeled_loss = lossFn(logits, batch.y)
         
         # 无标签损失计算 - 使用分离的静态和动态特征
         with torch.no_grad():
             weak_predictions = []
             for _ in range(n_augments):
-                pred_weak = model(weak_batch.x_dynamic, weak_batch.x_static, weak_batch.edge_index, weak_batch.edge_attr)
+                pred_weak = model(weak_batch.x, weak_batch.edge_index, weak_batch.edge_attr)
                 weak_predictions.append(pred_weak)
             
             weak_predictions = torch.stack(weak_predictions)
@@ -98,7 +98,7 @@ def train_fixmatch(loader, weak_loader, strong_loader, model, lossFn, loss_unlab
               f"最小={variance_stats['min_std']:.6f}, "
               f"标准差={variance_stats['std_std']:.6f}")
 
-        logits_strong = model(strong_batch.x_dynamic, strong_batch.x_static, strong_batch.edge_index, strong_batch.edge_attr)
+        logits_strong = model(strong_batch.x, strong_batch.edge_index, strong_batch.edge_attr)
         # 直接使用模型输出形状，无需 reshape（参考 Fixmatch_ESTnet_V2.py）
         point_wise_loss = loss_unlabeled_fn(logits_strong, pseudo_labels)  # reduction='none'，返回逐点损失
         unlabeled_loss = (weights * point_wise_loss).mean()  # 加权平均
@@ -158,12 +158,12 @@ def test_fixmatch(loader, model, lossFn, device, nNodes):
 
     with torch.no_grad():
         for batch in loader:
-            if batch.x_dynamic is None or batch.y is None:
+            if batch.x is None or batch.y is None:
                 continue
 
             batch = batch.to(device)
-            # 前向传播 - 使用分离的静态和动态特征
-            logits = model(batch.x_dynamic, batch.x_static, batch.edge_index, batch.edge_attr)
+            # 前向传播 - 使用统一的特征
+            logits = model(batch.x, batch.edge_index, batch.edge_attr)
 
             # 确保输出和标签形状兼容
             logits = logits.reshape(-1, nNodes)

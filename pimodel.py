@@ -11,7 +11,7 @@ import numpy as np
 from data_preprocessing import preprocess_unlabeled_data
 from data_generation import dataGen_ESTnet, dataGen_unlabeled_ESTnet
 from data_augmentation import TransformFixMatch
-from models import GNN_ESTNet
+from models import GNN
 from pimodel_training import train_pimodel, test_pimodel, loadCheckPoint
 from utils import plotHist
  
@@ -76,20 +76,14 @@ def main():
         'HLD': 128,
         'nMLP': 2,
         'nGNN': 3,
-        'nGAT': 1,
-        'nHeads': 1,
-        'K': 1,
-        'dynamic_dim': metadata['dynamic_dim'],
-        'static_dim': metadata['static_dim'],
+        'iDim': metadata['iDim'],  # 使用统一特征维度
         'oDim': metadata['oDim'],
-        'BN': False,
-        'Dropout': True,
     }
- 
-    modelName = f'geoEmbed_{dataParam["geoMethod"]}_pimodel_ESTnet_{dataParam["geoFeatures"]}Geo'
+
+    modelName = f'geoEmbed_{dataParam["geoMethod"]}_pimodel_{dataParam["geoFeatures"]}Geo'
     model_path = os.path.join(output_dir, modelName)
     print("步骤3: 初始化模型、优化器和损失函数")
-    model = GNN_ESTNet(modelParam).to(device)
+    model = GNN(modelParam).to(device)  # 使用统一的GNN模型
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9992)
     lossFn = torch.nn.HuberLoss().to(device)

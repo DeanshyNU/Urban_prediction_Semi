@@ -12,7 +12,7 @@ from copy import deepcopy
 from data_preprocessing import preprocess_unlabeled_data
 from data_generation import dataGen_ESTnet, dataGen_unlabeled_ESTnet
 from data_augmentation import TransformFixMatch
-from models import GNN_ESTNet
+from models import GNN
 from meanteacher_training import train_meanteacher, test_meanteacher, loadCheckPoint
 from utils import plotHist
 
@@ -71,24 +71,18 @@ def main():
         'HLD': 128,
         'nMLP': 2,
         'nGNN': 3,
-        'nGAT': 1,
-        'nHeads': 1,
-        'K': 1,
-        'dynamic_dim': metadata['dynamic_dim'],
-        'static_dim': metadata['static_dim'],
+        'iDim': metadata['iDim'],  # 使用统一特征维度
         'oDim': metadata['oDim'],
-        'BN': False,
-        'Dropout': True,
     }
 
-    modelName = f'geoEmbed_{dataParam["geoMethod"]}_meanteacher_ESTnet_{dataParam["geoFeatures"]}Geo'
+    modelName = f'geoEmbed_{dataParam["geoMethod"]}_meanteacher_{dataParam["geoFeatures"]}Geo'
     model_path = os.path.join(output_dir, modelName)
     print("步骤3: 初始化学生模型和教师模型")
 
     # 初始化学生模型
-    student_model = GNN_ESTNet(modelParam).to(device)
+    student_model = GNN(modelParam).to(device)  # 使用统一的GNN模型
     # 初始化教师模型（作为学生模型的副本）
-    teacher_model = GNN_ESTNet(modelParam).to(device)
+    teacher_model = GNN(modelParam).to(device)  # 使用统一的GNN模型
     # 复制学生模型的初始参数到教师模型
     for teacher_param, student_param in zip(teacher_model.parameters(), student_model.parameters()):
         teacher_param.data.copy_(student_param.data)

@@ -41,9 +41,16 @@ def apply_knn_sparsify(adj: np.ndarray, k: int = 8) -> np.ndarray:
     return out
 
 
-def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200):
+def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200, seed=42):
     """
     构建统一的图结构，包含有标签站点(68个)和无标签站点(200/500个)
+    
+    Args:
+        dataParam: 数据参数字典
+        path: 有标签数据路径
+        unlabeled_data: 无标签数据字典
+        n_unlabeled: 无标签站点数量
+        seed: 随机种子，用于选择无标签站点（确保可复现性）
     
     Returns:
         unified_adj: 统一的邻接矩阵
@@ -66,8 +73,9 @@ def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200):
     # 确保无标签站点数量匹配
     assert unlabeled_locations.shape[0] >= n_unlabeled, f"无标签站点数量不足，需要{n_unlabeled}个"
     if unlabeled_locations.shape[0] > n_unlabeled:
-        # 如果无标签站点数量超过需求，随机选择
-        selected_indices = np.random.choice(
+        # 如果无标签站点数量超过需求，随机选择（使用固定seed确保可复现性）
+        rng = np.random.default_rng(seed)
+        selected_indices = rng.choice(
             unlabeled_locations.shape[0], 
             size=n_unlabeled, 
             replace=False
@@ -359,7 +367,7 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
             _tdf = features[n:n + _window, :, cfdIdx]
             _tdf = np.transpose(_tdf, (1, 0, 2)).reshape(len(Adj), -1)
         
-        # ESTNet风格：分离动态和静态特征
+        # 合并所有特征为一个统一的特征向量（参考 downscale-gnn/network.py）
         # 1. 动态特征：CFD特征（当前+时间窗口）+ CLMS动态特征
         if _tdf is not None:
             # 使用历史和未来窗口
@@ -371,10 +379,10 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
         else:
             # 只使用历史窗口
             dynamic_features = np.hstack([
-            _feature[:, cfdIdx],      # 当前CFD特征
+                _feature[:, cfdIdx],      # 当前CFD特征
                 _tdb,                    # 历史时间窗口CFD特征
-            _feature[:, clmsIdx]      # CLMS动态特征
-        ])
+                _feature[:, clmsIdx]      # CLMS动态特征
+            ])
         
         # 2. 静态特征：静态地理特征
         static_features = np.hstack([
@@ -382,39 +390,32 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
             _geoFeatures                 # 处理后的空间特征
         ])
         
+        # 3. 合并动态和静态特征为一个统一的特征向量
+        combined_features = np.hstack([dynamic_features, static_features])
+        
         _target = targets[n].reshape(-1, 1)
         _dataset.append(
             Data(
-                x_dynamic=torch.FloatTensor(dynamic_features),
-                x_static=torch.FloatTensor(static_features),
+                x=torch.FloatTensor(combined_features),  # 使用统一的 x 而不是 x_dynamic 和 x_static
                 y=torch.FloatTensor(_target),
                 edge_index=edgeIdxV,
                 edge_attr=edgeAttrV
             )
         )
     
-    # 特征索引跟踪
-    # 1. 动态特征索引
+    # 特征索引跟踪（统一特征）
     # 根据geoFeatures决定CFD特征长度
     if dataParam.get('geoFeatures', 'full') == 'full':
         _cfdFeatLen = len(cfdIdx) * (_window + 1)  # 当前+历史窗口（不使用未来窗口）
     else:
         _cfdFeatLen = len(cfdIdx) * (2 * _window + 1)  # 当前+历史窗口+未来窗口
     _clmsFeatLen = len(clmsIdx)  # CLMS特征长度
-    _dynamic_feat_lengths = np.cumsum([_cfdFeatLen, _clmsFeatLen])
-    _dynamic_feature_idx = {
-        'CFD': np.arange(0, _dynamic_feat_lengths[0]),
-        'CLMS': np.arange(_dynamic_feat_lengths[0], _dynamic_feat_lengths[1]),
-    }
-    
-    # 2. 静态特征索引
     _rawGeoFeatLen = len(rawGeoFeatIdx)
-    _geoFeatLen = len(_geoFeatures.T)
-    _static_feat_lengths = np.cumsum([_rawGeoFeatLen, _geoFeatLen])
-    _static_feature_idx = {
-        'rawGeo': np.arange(0, _static_feat_lengths[0]),
-        'embedGeo': np.arange(_static_feat_lengths[0], _static_feat_lengths[1]),
-    }
+    # 使用.shape[1]更稳定（兼容tensor和array）
+    _geoFeatLen = _geoFeatures.shape[1] if hasattr(_geoFeatures, 'shape') else len(_geoFeatures.T)
+    
+    # 统一特征维度
+    _iDim = _cfdFeatLen + _clmsFeatLen + _rawGeoFeatLen + _geoFeatLen
     
     # 数据集分割
     _generator = torch.Generator().manual_seed(19)
@@ -424,16 +425,13 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
     trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=not predMode)
     validLoader = DataLoader(validSet, batch_size=len(validSet), shuffle=False)
     
-    # 记录元数据
+    # 记录元数据（使用统一的 iDim）
     metadata = {
         'nNodes': _nStations,
         'geoOff': _off,
         'geoScl': _scl,
-        'dynamic_dim': dynamic_features.shape[1],
-        'static_dim': static_features.shape[1],
+        'iDim': _iDim,  # 统一特征维度
         'oDim': _target.shape[-1],
-        'dynamic_feature_idx': _dynamic_feature_idx,
-        'static_feature_idx': _static_feature_idx,
         'geoMethod': dataParam['geoMethod'],
         'poolSize': dataParam['poolSize'],
         'nCompPCA': dataParam['nCompPCA'],
@@ -492,13 +490,6 @@ def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False
         for j in range(nNodes):
             Distance[i, j] = np.sqrt((Map[i, 0] - Map[j, 0])**2 + (Map[i, 1] - Map[j, 1])**2)
 
-    # 归一化距离矩阵
-    Distance_min = np.min(Distance)
-    Distance_max = np.max(Distance)
-    if Distance_max > Distance_min:
-        Distance = (Distance - Distance_min) / (Distance_max - Distance_min)
-    _dist = Distance
-
     # 计算相似性矩阵
     Matrix = np.zeros((nNodes, nNodes))
     for i in range(nNodes):
@@ -509,8 +500,8 @@ def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False
             Matrix[i, j] = r
     _simiW = Matrix
 
-    # 构建加权邻接矩阵
-    _distW = np.exp(-_dist)
+    # 构建加权邻接矩阵（与有标签数据一致：原始距离 → exp(-dist) → MinMax归一化）
+    _distW = np.exp(-Distance)  # 直接对原始距离取exp，与有标签数据一致
     _off_dist, _scl_dist = np.min(_distW), np.max(_distW) - np.min(_distW)
     if _scl_dist > 0:
         _distW = (_distW - _off_dist) / _scl_dist
@@ -573,7 +564,7 @@ def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False
         # 获取当前静态特征
         _urban_feature = expanded_urban_feature[n]
         
-        # 按照ESTNet风格组合特征
+        # 合并所有特征为一个统一的特征向量（参考 downscale-gnn/network.py）
         # 1. 动态特征：当前CFD + 历史和未来CFD窗口 + CLMS
         if _tdf is not None:
             # 使用历史和未来窗口
@@ -585,10 +576,10 @@ def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False
         else:
             # 只使用历史窗口
             dynamic_features = np.hstack([
-            _cfd_feature,  # 当前CFD特征
+                _cfd_feature,  # 当前CFD特征
                 _tdb,         # 历史时间窗口CFD特征
-            _clms_feature  # CLMS特征
-        ])
+                _clms_feature  # CLMS特征
+            ])
         
         # 2. 静态特征：UrbanFeature + 空间嵌入特征
         static_features = np.hstack([
@@ -596,49 +587,39 @@ def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False
             _geoFeatures     # 空间嵌入特征
         ])
         
-        # 创建Data对象
+        # 3. 合并动态和静态特征为一个统一的特征向量
+        combined_features = np.hstack([dynamic_features, static_features])
+        
+        # 创建Data对象（使用统一的 x）
         if labeled and targets is not None:
             _target = targets[n].reshape(-1, 1)
             data_obj = Data(
-                x_dynamic=torch.FloatTensor(dynamic_features),
-                x_static=torch.FloatTensor(static_features),
+                x=torch.FloatTensor(combined_features),  # 使用统一的 x
                 y=torch.FloatTensor(_target),
                 edge_index=edgeIdxV,
                 edge_attr=edgeAttrV
             )
         else:
             data_obj = Data(
-                x_dynamic=torch.FloatTensor(dynamic_features),
-                x_static=torch.FloatTensor(static_features),
+                x=torch.FloatTensor(combined_features),  # 使用统一的 x
                 edge_index=edgeIdxV,
                 edge_attr=edgeAttrV
             )
         
         _dataset.append(data_obj)
     
-    # 计算特征索引长度以便跟踪
+    # 计算统一特征维度
     # 根据geoFeatures决定CFD特征长度
     if dataParam.get('geoFeatures', 'full') == 'full':
         _cfdFeatLen = nCFDFeats * (_window + 1)  # 当前+历史窗口（不使用未来窗口）
     else:
         _cfdFeatLen = nCFDFeats * (2 * _window + 1)  # 当前+历史窗口+未来窗口
     _clmsFeatLen = nCLMSFeats
-    
-    # 1. 动态特征索引
-    _dynamic_feat_lengths = np.cumsum([_cfdFeatLen, _clmsFeatLen])
-    _dynamic_feature_idx = {
-        'CFD': np.arange(0, _dynamic_feat_lengths[0]),
-        'CLMS': np.arange(_dynamic_feat_lengths[0], _dynamic_feat_lengths[1]),
-    }
-    
-    # 2. 静态特征索引
     _urbanFeatLen = UrbanFeature.shape[1]
     _geoFeatLen = _geoFeatures.shape[1]
-    _static_feat_lengths = np.cumsum([_urbanFeatLen, _geoFeatLen])
-    _static_feature_idx = {
-        'Urban': np.arange(0, _static_feat_lengths[0]),
-        'embedGeo': np.arange(_static_feat_lengths[0], _static_feat_lengths[1]),
-    }
+    
+    # 统一特征维度
+    _iDim = _cfdFeatLen + _clmsFeatLen + _urbanFeatLen + _geoFeatLen
     
     # 数据集分割
     _generator = torch.Generator().manual_seed(seed)
@@ -651,16 +632,13 @@ def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False
     validLoader = DataLoader(validSet, batch_size=len(validSet), shuffle=False)
     testLoader = DataLoader(testSet, batch_size=len(testSet), shuffle=False)
     
-    # 记录元数据
+    # 记录元数据（使用统一的 iDim）
     metadata = {
         'nNodes': _nStations,
         'geoOff': _off,
         'geoScl': _scl,
-        'dynamic_dim': dynamic_features.shape[1],
-        'static_dim': static_features.shape[1],
+        'iDim': _iDim,  # 统一特征维度
         'oDim': 1 if labeled else None,
-        'dynamic_feature_idx': _dynamic_feature_idx,
-        'static_feature_idx': _static_feature_idx,
         'geoMethod': dataParam['geoMethod'],
         'poolSize': dataParam['poolSize'],
         'nCompPCA': dataParam['nCompPCA'],

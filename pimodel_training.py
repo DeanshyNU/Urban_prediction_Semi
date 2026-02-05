@@ -74,12 +74,12 @@ def train_pimodel(loader, aug1_loader, aug2_loader, model, lossFn, consistency_l
         opt.zero_grad(set_to_none=True)
  
         # 有标签损失计算
-        logits = model(batch.x_dynamic, batch.x_static, batch.edge_index, batch.edge_attr)
+        logits = model(batch.x, batch.edge_index, batch.edge_attr)
         labeled_loss = lossFn(logits, batch.y)
- 
+
         # 一致性损失计算：对同一无标签数据的两次不同增强预测应该一致
-        pred1 = model(aug1_batch.x_dynamic, aug1_batch.x_static, aug1_batch.edge_index, aug1_batch.edge_attr)
-        pred2 = model(aug2_batch.x_dynamic, aug2_batch.x_static, aug2_batch.edge_index, aug2_batch.edge_attr)
+        pred1 = model(aug1_batch.x, aug1_batch.edge_index, aug1_batch.edge_attr)
+        pred2 = model(aug2_batch.x, aug2_batch.edge_index, aug2_batch.edge_attr)
         consistency_loss = consistency_loss_fn(pred1, pred2)
  
         # 总损失
@@ -138,12 +138,12 @@ def test_pimodel(loader, model, lossFn, device, nNodes):
  
     with torch.no_grad():
         for batch in loader:
-            if batch.x_dynamic is None or batch.y is None:
+            if batch.x is None or batch.y is None:
                 continue
- 
+
             batch = batch.to(device)
-            # 前向传播
-            logits = model(batch.x_dynamic, batch.x_static, batch.edge_index, batch.edge_attr)
+            # 前向传播 - 使用统一的特征
+            logits = model(batch.x, batch.edge_index, batch.edge_attr)
  
             # 确保输出和标签形状兼容
             logits = logits.reshape(-1, nNodes)
