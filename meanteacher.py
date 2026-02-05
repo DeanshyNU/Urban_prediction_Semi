@@ -7,6 +7,8 @@ import torch
 import pickle
 import numpy as np
 from copy import deepcopy
+from datetime import datetime
+import wandb
 
 # 导入自定义模块
 from data_preprocessing import preprocess_unlabeled_data
@@ -24,10 +26,17 @@ DATA_PATH = '/projects/p32685/Fixmatch/data'
 
 
 def main():
-    # 创建输出目录
-    output_dir = './MeanTeacher_ESTnet'
+    # 获取当前时间和 job id
+    current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    job_id = os.environ.get('SLURM_JOB_ID', 'local')
+    
+    # 创建输出目录：方法名_时间_jobid
+    method_name = 'meanteacher'
+    output_dir = f'./{method_name}_{current_time}_job{job_id}'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+    
+    print(f"输出目录: {output_dir}")
 
     ##----------------------数据预处理----------------------
     print("步骤0: 预处理无标签数据")
@@ -111,10 +120,35 @@ def main():
         print("学生模型架构:", file=f)
         print(student_model, file=f)
 
+    # 初始化 W&B
+    run_name = f'{method_name}_{current_time}_job{job_id}'
+    wandb.init(
+        entity="urban_prediction",
+        project="Semi-supervised GNN",
+        name=run_name,
+        config={
+            **dataParam,
+            **modelParam,
+            'method': 'MeanTeacher',
+            'n_unlabeled': n_unlabeled,
+            'nNodes': metadata['nNodes'],
+            'nEpoch': nEpoch,
+            'lr': 1e-3,
+            'scheduler_gamma': 0.9992,
+            'lambda_U': 10.0,
+            'ramp_epochs': 30,
+            'ema_alpha': 0.999,
+            'output_dir': output_dir,
+        }
+    )
+    
     # 记录配置
     with open(f'./{model_path}_log', 'a') as f:
         print("="*60, file=f)
         print("Mean Teacher配置:", file=f)
+        print(f"  实验时间: {current_time}", file=f)
+        print(f"  Job ID: {job_id}", file=f)
+        print(f"  输出目录: {output_dir}", file=f)
         print("  方法: Mean Teacher（教师-学生架构）", file=f)
         print("  数据增强: weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5（UrbanFeature不增强）", file=f)
         print("  一致性损失: MSELoss", file=f)
@@ -159,6 +193,25 @@ def main():
             print(f"RMSE 标准差: {trainRMSE[1]:1.3f}/{validRMSE[1]:1.3f}; "
                   f"最小值: {trainRMSE[2]:1.3f}/{validRMSE[2]:1.3f}; "
                   f"最大值: {trainRMSE[3]:1.3f}/{validRMSE[3]:1.3f};", file=f)
+        
+        # 记录到 W&B
+        wandb.log({
+            'epoch': epoch,
+            'train/loss': trainLoss,
+            'train/rmse': trainRMSE[0],
+            'train/rmse_std': trainRMSE[1],
+            'train/rmse_min': trainRMSE[2],
+            'train/rmse_max': trainRMSE[3],
+            'valid/loss': validLoss,
+            'valid/rmse': validRMSE[0],
+            'valid/rmse_std': validRMSE[1],
+            'valid/rmse_min': validRMSE[2],
+            'valid/rmse_max': validRMSE[3],
+            'learning_rate': scheduler.get_last_lr()[0],
+            'lambda_U': 10.0 * ramp,
+            'ramp_factor': ramp,
+            'global_step': global_step,
+        })
 
         # 保存最佳模型（保存教师模型）
         if validRMSE[0] < bestLoss:
@@ -173,6 +226,7 @@ def main():
                 'bestLoss': bestLoss,
                 'hist': hist,
             }, chkptPath)
+            wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
 
         # 绘制训练历史
         hist.append([trainLoss, validLoss, trainRMSE[0], validRMSE[0]])
