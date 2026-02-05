@@ -60,7 +60,7 @@ def main():
     augmenter = TransformFixMatch(weak_n=2, weak_m=3, strong_n=3, strong_m=6)
     augmented_data, _ = augmenter(unlabeled_data)
 
-    unlabeled_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, augmented_data, labeled=False)
+    unlabeled_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, augmented_data, labeled=False, path=DATA_PATH)
     print(f"增强后无标签样本数量: {len(unlabeled_loader.dataset)}")
     print(f"有标签训练样本数量: {len(trainLoader.dataset)}")
     print(f"有标签验证样本数量: {len(validLoader.dataset)}")

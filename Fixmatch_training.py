@@ -43,7 +43,7 @@ def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=
     return EPOCH, bestLoss, chkptPath, hist
 
 
-def train_fixmatch(loader, weak_loader, strong_loader, model, lossFn, loss_unlabaledFn, opt, scheduler, device, nNodes, lambda_U=10.0):
+def train_fixmatch(loader, weak_loader, strong_loader, model, lossFn, loss_unlabeled_fn, opt, scheduler, device, nNodes, lambda_U=10.0):
     """
     FixMatch训练函数
     """
@@ -100,7 +100,7 @@ def train_fixmatch(loader, weak_loader, strong_loader, model, lossFn, loss_unlab
 
         logits_strong = model(strong_batch.x_dynamic, strong_batch.x_static, strong_batch.edge_index, strong_batch.edge_attr)
         # 直接使用模型输出形状，无需 reshape（参考 Fixmatch_ESTnet_V2.py）
-        point_wise_loss = loss_unlabaledFn(logits_strong, pseudo_labels)  # reduction='none'，返回逐点损失
+        point_wise_loss = loss_unlabeled_fn(logits_strong, pseudo_labels)  # reduction='none'，返回逐点损失
         unlabeled_loss = (weights * point_wise_loss).mean()  # 加权平均
         
         # 总损失

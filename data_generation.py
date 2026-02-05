@@ -445,17 +445,41 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
     return trainLoader, validLoader, metadata, validSet
 
 
-def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False, labeled=False):
+def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False, labeled=False, path=None):
     """
     按照ESTNet风格生成无标签数据
     
     静态特征：静态地理特征（UrbanFeature，不包含CLMS）
     动态特征：CFD/WRF特征（包括当前和时间窗口）+ CLMS动态特征
     不包含辅助变量（站点ID和时间信息）
+    
+    归一化策略：UrbanFeatureMat（地理嵌入）必须统一归一化
+    - 如果提供了 path，则从有标签数据获取归一化参数，保证特征尺度一致
+    - 否则使用无标签数据自己的归一化参数（不推荐）
+    
+    Args:
+        dataParam: 数据参数字典
+        data: 无标签数据字典
+        nTrn: 训练集比例
+        seed: 随机种子
+        predMode: 预测模式
+        labeled: 是否有标签
+        path: 可选。有标签数据目录路径。若提供，则使用有标签数据的归一化参数归一化 UrbanFeatureMat。
     """
     _window = dataParam['window']
     _batchSize = dataParam['batchSize']
-    _geoFeatures, _off, _scl, _nStations = genGeoFeatures_unlabeled(data, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'])
+    
+    # UrbanFeatureMat 统一归一化：如果提供了 path，使用有标签数据的归一化参数
+    if path is not None:
+        print("  从有标签数据获取 UrbanFeatureMat 归一化参数...")
+        _, _off_labeled, _scl_labeled, _ = genGeoFeatures(path, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'])
+        _geoFeatures, _off, _scl, _nStations = genGeoFeatures_unlabeled(
+            data, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'],
+            norm_off=_off_labeled, norm_scl=_scl_labeled  # 使用有标签数据的归一化参数
+        )
+    else:
+        print("  ⚠️  使用无标签数据自己的归一化参数（建议传入 path 参数以统一归一化）")
+        _geoFeatures, _off, _scl, _nStations = genGeoFeatures_unlabeled(data, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'])
 
     # --------------------------图构建--------------------------
     Map = data['Map']  # (nNodes, 2)

@@ -87,6 +87,16 @@ def preprocess_unlabeled_data(unlabeled_file, target_station_count=500, nTimeste
     """
     完整的无标签数据预处理流程
     
+    归一化策略（参考 downscale-gnn/data_semi.py）：
+    ✅ WRF/CLMS（时序特征）：分开归一化
+       - 时间段不同（有标签：2018.5-8，无标签：2018.5-9 + 2019.5-8）
+       - 数据源不同 → 分布本来就不同
+       - 分开归一化 + clip到[0,1] → 保证范围一致即可
+    ✅ UrbanFeatureMat（地理嵌入）：统一归一化
+       - 静态空间特征，同一地理区域
+       - 在 data_generation.py 的 genGeoFeatures_unlabeled 中统一处理
+       - 本函数不处理 UrbanFeatureMat 的归一化
+    
     Args:
         unlabeled_file: 无标签数据文件路径
         target_station_count: 目标站点数量
@@ -132,12 +142,29 @@ def preprocess_unlabeled_data(unlabeled_file, target_station_count=500, nTimeste
         unlabeled_data, nStations=target_station_count, nTimesteps=nTimesteps
     )
     
-    # 7. 归一化
-    print("正在归一化数据...")
-    unlabeled_data['CLMSMat'], _, _ = MinMax(unlabeled_data['CLMSMat'])
-    unlabeled_data['WRFMat'], _, _ = MinMax(unlabeled_data['WRFMat'])
-    unlabeled_data['UrbanFeature'], _, _ = MinMax_first_dim(unlabeled_data['UrbanFeature'])
+    # 7. 归一化（WRF/CLMS：分开归一化；UrbanFeatureMat：在 data_generation 中统一处理）
+    print("\n正在归一化数据...")
+    print("  归一化策略：")
+    print("    - WRF/CLMS（时序特征）：分开归一化（时间段不同、数据源不同）")
+    print("    - UrbanFeatureMat（地理嵌入）：在 data_generation.py 中统一归一化")
     
-    print("数据预处理完成！")
+    # 7.1 归一化 CLMSMat（独立归一化 + clip到[0,1]）
+    print("\n  归一化 CLMSMat（独立归一化）...")
+    print(f"    归一化前: min={np.min(unlabeled_data['CLMSMat']):.6f}, max={np.max(unlabeled_data['CLMSMat']):.6f}, mean={np.mean(unlabeled_data['CLMSMat']):.6f}")
+    unlabeled_data['CLMSMat'], _, _ = MinMax(unlabeled_data['CLMSMat'])
+    unlabeled_data['CLMSMat'] = np.clip(unlabeled_data['CLMSMat'], 0.0, 1.0)  # clip到[0,1]
+    print(f"    归一化后（clip后）: min={np.min(unlabeled_data['CLMSMat']):.6f}, max={np.max(unlabeled_data['CLMSMat']):.6f}, mean={np.mean(unlabeled_data['CLMSMat']):.6f}")
+    
+    # 7.2 归一化 WRFMat（独立归一化 + clip到[0,1]）
+    print("\n  归一化 WRFMat（独立归一化）...")
+    print(f"    归一化前: min={np.min(unlabeled_data['WRFMat']):.6f}, max={np.max(unlabeled_data['WRFMat']):.6f}, mean={np.mean(unlabeled_data['WRFMat']):.6f}")
+    unlabeled_data['WRFMat'], _, _ = MinMax(unlabeled_data['WRFMat'])
+    unlabeled_data['WRFMat'] = np.clip(unlabeled_data['WRFMat'], 0.0, 1.0)  # clip到[0,1]
+    print(f"    归一化后（clip后）: min={np.min(unlabeled_data['WRFMat']):.6f}, max={np.max(unlabeled_data['WRFMat']):.6f}, mean={np.mean(unlabeled_data['WRFMat']):.6f}")
+    
+    # 注意：UrbanFeature 和 UrbanFeatureMat 的归一化在 data_generation.py 中统一处理
+    # 这里不处理 UrbanFeature 的归一化
+    
+    print("\n数据预处理完成！")
     return unlabeled_data
 

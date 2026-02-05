@@ -12,7 +12,7 @@ from data_preprocessing import preprocess_unlabeled_data
 from data_generation import dataGen_ESTnet, dataGen_unlabeled_ESTnet
 from data_augmentation import TransformFixMatch
 from models import GNN_ESTNet
-from training import train_fixmatch, test_fixmatch, loadCheckPoint
+from Fixmatch_training import train_fixmatch, test_fixmatch, loadCheckPoint
 from utils import plotHist
 
 # 设备配置
@@ -59,8 +59,8 @@ def main():
     augmenter = TransformFixMatch(weak_n=2, weak_m=3, strong_n=3, strong_m=6)
     weak_augmented_data, strong_augmented_data = augmenter(unlabeled_data)
     
-    weak_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, weak_augmented_data, labeled=False)
-    strong_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, strong_augmented_data, labeled=False)
+    weak_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, weak_augmented_data, labeled=False, path=DATA_PATH)
+    strong_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, strong_augmented_data, labeled=False, path=DATA_PATH)
     print(f"弱增强样本数量: {len(weak_loader.dataset)}")
     print(f"强增强样本数量: {len(strong_loader.dataset)}")
     print(f"trainLoader长度: {len(trainLoader)}")

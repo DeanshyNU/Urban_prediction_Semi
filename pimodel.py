@@ -63,8 +63,8 @@ def main():
     aug1_data, _ = augmenter1(unlabeled_data)
     aug2_data, _ = augmenter2(unlabeled_data)
  
-    aug1_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, aug1_data, labeled=False)
-    aug2_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, aug2_data, labeled=False)
+    aug1_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, aug1_data, labeled=False, path=DATA_PATH)
+    aug2_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, aug2_data, labeled=False, path=DATA_PATH)
     print(f"第一次增强样本数量: {len(aug1_loader.dataset)}")
     print(f"第二次增强样本数量: {len(aug2_loader.dataset)}")
     print(f"有标签训练样本数量: {len(trainLoader.dataset)}")
