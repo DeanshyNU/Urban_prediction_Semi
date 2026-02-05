@@ -55,8 +55,8 @@ def main():
 
     ##----------------------数据增强----------------------
     print("步骤2: 对无标签数据应用数据增强")
-    # V2: 增强参数从 weak_n=3, weak_m=8, strong_n=6, strong_m=15 改为 weak_n=2, weak_m=3, strong_n=3, strong_m=6
-    augmenter = TransformFixMatch(weak_n=2, weak_m=3, strong_n=3, strong_m=6)
+    # 增强强度：weak_m=1.5（温和），strong_m=4.5（明显更强，保持约1:3比例）
+    augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5)
     weak_augmented_data, strong_augmented_data = augmenter(unlabeled_data)
     
     weak_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, weak_augmented_data, labeled=False, path=DATA_PATH)
@@ -104,7 +104,7 @@ def main():
     # 在模型初始化后记录配置
     with open(f'./{model_path}_log', 'a') as f:
         print("模型配置:", file=f)
-        print("  数据增强: weak_n=2, weak_m=3, strong_n=3, strong_m=6", file=f)
+        print("  数据增强: weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5（UrbanFeature不增强）", file=f)
         print("  UQ参数: epsilon=1e-5, temperature=0.5, n_augments=5", file=f)
         print("  权重处理: 标准归一化，无权重限幅", file=f)
         print("  优化: lr=1e-3, 无weight_decay, 无梯度裁剪", file=f)

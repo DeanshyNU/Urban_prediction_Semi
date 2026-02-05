@@ -56,8 +56,9 @@ def main():
     ##----------------------数据增强----------------------
     print("步骤2: 对无标签数据应用两次不同的数据增强（Π-Model）")
     # 创建两个独立的增强器
-    augmenter1 = TransformFixMatch(weak_n=2, weak_m=3, strong_n=3, strong_m=6)
-    augmenter2 = TransformFixMatch(weak_n=2, weak_m=3, strong_n=3, strong_m=6)
+    # 增强强度：weak_m=1.5（温和），strong_m=4.5（明显更强，保持约1:3比例）
+    augmenter1 = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5)
+    augmenter2 = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5)
  
     # 生成两次不同的增强
     aug1_data, _ = augmenter1(unlabeled_data)
@@ -108,7 +109,7 @@ def main():
         print("="*60, file=f)
         print("Π-Model配置:", file=f)
         print("  方法: Π-Model（一致性正则化）", file=f)
-        print("  数据增强: weak_n=2, weak_m=3, strong_n=3, strong_m=6", file=f)
+        print("  数据增强: weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5（UrbanFeature不增强）", file=f)
         print("  一致性损失: MSELoss", file=f)
         print("  优化: lr=1e-3, 学习率衰减=0.9992", file=f)
         print(f"  无标签损失权重: lambda_U（带ramp-up）", file=f)

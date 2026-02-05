@@ -57,7 +57,8 @@ def main():
     ##----------------------数据增强----------------------
     print("步骤2: 对无标签数据应用数据增强（Mean Teacher）")
     # Mean Teacher只需要一次增强
-    augmenter = TransformFixMatch(weak_n=2, weak_m=3, strong_n=3, strong_m=6)
+    # 增强强度：weak_m=1.5（温和），strong_m=4.5（明显更强，保持约1:3比例）
+    augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5)
     augmented_data, _ = augmenter(unlabeled_data)
 
     unlabeled_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, augmented_data, labeled=False, path=DATA_PATH)
@@ -115,7 +116,7 @@ def main():
         print("="*60, file=f)
         print("Mean Teacher配置:", file=f)
         print("  方法: Mean Teacher（教师-学生架构）", file=f)
-        print("  数据增强: weak_n=2, weak_m=3, strong_n=3, strong_m=6", file=f)
+        print("  数据增强: weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5（UrbanFeature不增强）", file=f)
         print("  一致性损失: MSELoss", file=f)
         print("  优化: lr=1e-3, 学习率衰减=0.9992", file=f)
         print(f"  无标签损失权重: lambda_U（带ramp-up）", file=f)
