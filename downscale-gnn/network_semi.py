@@ -133,6 +133,16 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes,nNodes_labeled):
             print(f"   均值: {_yHat_unlabeled.mean().item():.4f}")
             print(f"   标准差: {_yHat_unlabeled.std().item():.4f}")
             print(f"   范围: [{_yHat_unlabeled.min().item():.4f}, {_yHat_unlabeled.max().item():.4f}]")
+            
+            # 边权重统计
+            edge_attr = _batch.edge_attr.cpu().numpy()
+            if len(edge_attr) > 0:
+                print(f"✓ 边权重统计:")
+                print(f"   数量: {len(edge_attr)}")
+                print(f"   最小值: {np.min(edge_attr):.6f}")
+                print(f"   最大值: {np.max(edge_attr):.6f}")
+                print(f"   均值: {np.mean(edge_attr):.6f}")
+                print(f"   标准差: {np.std(edge_attr):.6f}")
             print("="*70 + "\n")
             _verification_printed = True
         
