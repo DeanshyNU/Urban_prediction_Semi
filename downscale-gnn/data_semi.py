@@ -79,8 +79,12 @@ def genGeoFeatures(path,geoMethod='average',poolSize=15,nCompPCA=40):
     
     return _geoFeatures,_off,_scl,_nStations
 
-def genGeoFeatures_unlabeled(unlabeled_data, geoMethod='average', poolSize=15, nCompPCA=40):
-    """为无标签数据生成地理特征"""
+def genGeoFeatures_unlabeled(unlabeled_data, geoMethod='average', poolSize=15, nCompPCA=40, 
+                              norm_off=None, norm_scl=None):
+    """
+    为无标签数据生成地理特征
+    如果提供了 norm_off 和 norm_scl，则使用这些参数进行归一化（与有标签数据一致）
+    """
     _raw = unlabeled_data['UrbanFeatureMat']  # (401, 401, 7, nStations)
     print(f"  无标签原始特征数: {_raw.shape[2]}")
     
@@ -88,25 +92,50 @@ def genGeoFeatures_unlabeled(unlabeled_data, geoMethod='average', poolSize=15, n
     _imageSize, _, _nFeatures, _nStations = _raw.shape
     print(f"  使用特征数: {_nFeatures}")
     
+    # 归一化参数：如果提供了则使用，否则自己计算
+    use_provided_norm = (norm_off is not None and norm_scl is not None)
+    
     if geoMethod == 'average':
-        _norm = np.transpose(_raw, (2, 0, 1, 3)).reshape(_nFeatures, -1)
-        _min, _max = np.min(_norm, axis=1), np.max(_norm, axis=1)
-        _max[_max == 0] = 1e-5
-        _off = _min
-        _scl = _max - _min
-        _scl[_scl == 0] = 1e-5  # 避免除以0产生NaN
+        if use_provided_norm:
+            _off = norm_off
+            _scl = norm_scl
+            print(f"  ✓ 使用有标签数据的归一化参数")
+        else:
+            _norm = np.transpose(_raw, (2, 0, 1, 3)).reshape(_nFeatures, -1)
+            _min, _max = np.min(_norm, axis=1), np.max(_norm, axis=1)
+            _max[_max == 0] = 1e-5
+            _off = _min
+            _scl = _max - _min
+            _scl[_scl == 0] = 1e-5  # 避免除以0产生NaN
+            print(f"  ⚠️  使用无标签数据自己的归一化参数")
+        
+        # 归一化前统计
+        _raw_flat = np.transpose(_raw, (2, 0, 1, 3)).reshape(_nFeatures, -1)
+        print(f"  归一化前统计: min=[{np.min(_raw_flat, axis=1)}], max=[{np.max(_raw_flat, axis=1)}]")
         
         _norm = np.transpose(_raw, (0, 1, 3, 2))
         _norm = (_norm - _off) / _scl
+        
+        # 归一化后统计
+        _norm_flat = np.transpose(_norm, (2, 3, 0, 1)).reshape(_nStations, -1)
+        print(f"  归一化后统计: min={np.min(_norm_flat):.6f}, max={np.max(_norm_flat):.6f}, mean={np.mean(_norm_flat):.6f}")
+        
         _geoFeatures = np.transpose(_norm, (2, 3, 0, 1))
         _geoFeatures = torch.FloatTensor(_geoFeatures)
         _avgPool = torch.nn.AdaptiveAvgPool2d((poolSize, poolSize))
         _geoFeatures = _avgPool(_geoFeatures).reshape(_nStations, -1)
     
     elif geoMethod == 'pca':
-        _norm = np.transpose(_raw, (2, 0, 1, 3)).reshape(_nFeatures, -1)
-        _off, _scl = np.mean(_norm, axis=1), np.std(_norm, axis=1)
-        _scl[_scl == 0] = 1e-5  # 避免除以0产生NaN
+        if use_provided_norm:
+            _off = norm_off
+            _scl = norm_scl
+            print(f"  ✓ 使用有标签数据的归一化参数")
+        else:
+            _norm = np.transpose(_raw, (2, 0, 1, 3)).reshape(_nFeatures, -1)
+            _off, _scl = np.mean(_norm, axis=1), np.std(_norm, axis=1)
+            _scl[_scl == 0] = 1e-5  # 避免除以0产生NaN
+            print(f"  ⚠️  使用无标签数据自己的归一化参数")
+        
         _norm = np.transpose(_raw, (0, 1, 3, 2))
         _norm = (_norm - _off) / _scl
         _geoFeatures = np.transpose(_norm, (2, 3, 0, 1))
@@ -157,19 +186,32 @@ def dataGen(dataParam,path,nTrn=0.75,predMode=False,n_unlabeled=200):
     UrbanFeatureMat_unlabeled = np.nan_to_num(UrbanFeatureMat_unlabeled, nan=0.0)
     
     # 为无标签数据生成地理特征
-    # 无标签数据不需要删除第5维，直接使用原始7个特征
-    unlabeled_subset = {'UrbanFeatureMat': UrbanFeatureMat_unlabeled}
-    print(f"  使用参数: poolSize={dataParam['poolSize']}, geoMethod={dataParam['geoMethod']}")
-    _geoFeatures_unlabeled, _, _, _ = genGeoFeatures_unlabeled(
-        unlabeled_subset, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA']
-    )
-    
     # --------------------------加载有标签数据--------------------------
     print("正在加载有标签数据...")
     print(f"  使用参数: poolSize={dataParam['poolSize']}, geoMethod={dataParam['geoMethod']}")
     _geoFeatures_labeled, _off, _scl, _nStations_labeled = genGeoFeatures(
         path, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA']
     )
+    
+    # 打印有标签数据归一化参数
+    print(f"\n有标签数据归一化参数:")
+    print(f"  _off: min={np.min(_off):.6f}, max={np.max(_off):.6f}, mean={np.mean(_off):.6f}")
+    print(f"  _scl: min={np.min(_scl):.6f}, max={np.max(_scl):.6f}, mean={np.mean(_scl):.6f}")
+    
+    # 无标签数据使用有标签数据的归一化参数（关键修复）
+    unlabeled_subset = {'UrbanFeatureMat': UrbanFeatureMat_unlabeled}
+    print(f"\n正在生成无标签数据地理特征...")
+    print(f"  使用参数: poolSize={dataParam['poolSize']}, geoMethod={dataParam['geoMethod']}")
+    _geoFeatures_unlabeled, _off_unlabeled, _scl_unlabeled, _ = genGeoFeatures_unlabeled(
+        unlabeled_subset, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'],
+        norm_off=_off, norm_scl=_scl  # 使用有标签数据的归一化参数
+    )
+    
+    # 验证归一化一致性
+    print(f"\n归一化一致性检查:")
+    print(f"  有标签 _off: shape={_off.shape}, mean={np.mean(_off):.6f}")
+    print(f"  无标签 _off: shape={_off_unlabeled.shape}, mean={np.mean(_off_unlabeled):.6f}")
+    print(f"  参数是否一致: {np.allclose(_off, _off_unlabeled)}")
     
     # 转换为numpy array以便后续处理
     if torch.is_tensor(_geoFeatures_labeled):
@@ -240,10 +282,27 @@ def dataGen(dataParam,path,nTrn=0.75,predMode=False,n_unlabeled=200):
     Adj[Adj < dataParam['thres']] = 0.0
     np.fill_diagonal(Adj, 0.0)
     
-    # 计算边密度
+    # 计算边密度和统计信息
     n_edges_after = np.sum(Adj > 0)
     edge_density = n_edges_after / (Adj.shape[0] * (Adj.shape[0] - 1)) * 100
     print(f"图边密度: {edge_density:.2f}% ({n_edges_after}条边)")
+    
+    # 边权重统计
+    edge_weights = Adj[Adj > 0]
+    if len(edge_weights) > 0:
+        print(f"边权重统计: min={np.min(edge_weights):.6f}, max={np.max(edge_weights):.6f}, mean={np.mean(edge_weights):.6f}")
+    
+    # 检查有标签↔无标签之间的边
+    labeled_indices = np.arange(_nNodes_labeled)
+    unlabeled_indices = np.arange(_nNodes_labeled, _nNodes_total)
+    cross_edges = np.sum(Adj[np.ix_(labeled_indices, unlabeled_indices)] > 0)
+    print(f"有标签↔无标签边数: {cross_edges}")
+    
+    # 检查孤立节点
+    node_degrees = np.sum(Adj > 0, axis=1)
+    isolated_nodes = np.sum(node_degrees == 0)
+    if isolated_nodes > 0:
+        print(f"⚠️  警告: 发现{isolated_nodes}个孤立节点")
     
     # 确保对称性
     assert np.allclose(Adj, Adj.T)

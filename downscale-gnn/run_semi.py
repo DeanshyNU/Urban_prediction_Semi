@@ -91,6 +91,16 @@ def main():
     assert first_sample.label_mask.sum() == nNodes_labeled, \
         f"样本标签掩码不匹配: {first_sample.label_mask.sum()} != {nNodes_labeled}"
     print(f"✓ 数据集样本正确: 每个样本包含{nNodes_total}个节点的特征")
+    
+    # 检查5: 特征维度验证
+    print(f"✓ 特征维度验证:")
+    labeled_feat_dim = first_sample.x[first_sample.label_mask].shape[1]
+    unlabeled_feat_dim = first_sample.x[~first_sample.label_mask].shape[1]
+    print(f"   有标签节点特征维度: {labeled_feat_dim}")
+    print(f"   无标签节点特征维度: {unlabeled_feat_dim}")
+    assert labeled_feat_dim == unlabeled_feat_dim, \
+        f"特征维度不一致: 有标签={labeled_feat_dim}, 无标签={unlabeled_feat_dim}"
+    print(f"   ✓ 特征维度一致: {labeled_feat_dim}")
     print("="*70 + "\n")
     
     ##----------------------Generate model----------------------
@@ -213,6 +223,7 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'opt_state_dict':   opt.state_dict(),
                 'bestLoss':         bestLoss,
+                'hist':             hist,  # 修复：添加hist字段
                 }, chkptPath)
         # Plot training history
         hist.append([trainLoss,validLoss,trainRMSE[0],validRMSE[0]])
