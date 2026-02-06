@@ -19,6 +19,17 @@ supervised_*/
 supervised baseline/
 Fixmatch_ESTnet/
 old/
+# 统一输出目录（之后所有实验输出都放在 results/ 下）
+results/
+# 半监督实验输出：方法名_时间_jobid（当前在项目根目录时也忽略）
+*_job*/
+pimodel_*/
+meanteacher_*/
+fixmatch_no_uq_*/
+fixmatch_multiple_weak_*/
+fixmatch_heteroscedastic_*/
+downscale-gnn/semi_supervised_*/
+downscale-gnn/supervised_*/
 
 # 日志和输出文件
 *.log
