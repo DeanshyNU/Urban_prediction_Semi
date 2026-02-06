@@ -69,67 +69,67 @@ class GNN(torch.nn.Module):
         mu, log_var = torch.split(x, 1, dim=-1)  # 每个都是 (batch_size * nNodes, 1)
         return mu, log_var
     
-def train(loader,model,lossFn,opt,scheduler,device,nNodes):
-    model.train()
-    _LOSS = 0
-    pred,truth = [],[]
-    for _n, _batch in enumerate(loader):
-        _batch = _batch.to(device)
-        _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
-        _loss = lossFn(_yHat,_batch.y)
-        _loss.backward(retain_graph=False)
-        opt.step()
-        opt.zero_grad(set_to_none=True)
-        _LOSS += _loss
-        _pred = _yHat.reshape(-1,nNodes)
-        _truth = _batch.y.reshape(-1,nNodes)
-        pred += list(_pred.cpu().detach().numpy())
-        truth += list(_truth.cpu().detach().numpy())
-    scheduler.step()
-    truth, pred = np.array(truth), np.array(pred)
-    _RMSE = utils.RMSE(truth,pred)
-    return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
+# def train(loader,model,lossFn,opt,scheduler,device,nNodes):
+#     model.train()
+#     _LOSS = 0
+#     pred,truth = [],[]
+#     for _n, _batch in enumerate(loader):
+#         _batch = _batch.to(device)
+#         _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
+#         _loss = lossFn(_yHat,_batch.y)
+#         _loss.backward(retain_graph=False)
+#         opt.step()
+#         opt.zero_grad(set_to_none=True)
+#         _LOSS += _loss
+#         _pred = _yHat.reshape(-1,nNodes)
+#         _truth = _batch.y.reshape(-1,nNodes)
+#         pred += list(_pred.cpu().detach().numpy())
+#         truth += list(_truth.cpu().detach().numpy())
+#     scheduler.step()
+#     truth, pred = np.array(truth), np.array(pred)
+#     _RMSE = utils.RMSE(truth,pred)
+#     return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
 
-def test(loader,model,lossFn,device,nNodes):
-    model.eval()
-    _LOSS = 0
-    pred,truth = [],[]
-    for _n, _batch in enumerate(loader):
-        _batch = _batch.to(device)
-        _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
-        _loss = lossFn(_yHat,_batch.y)
-        _LOSS += _loss
-        _pred = _yHat.reshape(-1,nNodes)
-        _truth = _batch.y.reshape(-1,nNodes)
-        pred += list(_pred.cpu().detach().numpy())
-        truth += list(_truth.cpu().detach().numpy())
-    truth, pred = np.array(truth), np.array(pred)
-    _RMSE = utils.RMSE(truth,pred)
-    return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
+# def test(loader,model,lossFn,device,nNodes):
+#     model.eval()
+#     _LOSS = 0
+#     pred,truth = [],[]
+#     for _n, _batch in enumerate(loader):
+#         _batch = _batch.to(device)
+#         _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
+#         _loss = lossFn(_yHat,_batch.y)
+#         _LOSS += _loss
+#         _pred = _yHat.reshape(-1,nNodes)
+#         _truth = _batch.y.reshape(-1,nNodes)
+#         pred += list(_pred.cpu().detach().numpy())
+#         truth += list(_truth.cpu().detach().numpy())
+#     truth, pred = np.array(truth), np.array(pred)
+#     _RMSE = utils.RMSE(truth,pred)
+#     return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
 
-def loadCheckPoint(modelName,model,opt,device,load=False,resetLr=False,lr=5e-5,predMode=False):
-    chkptPath = f'./{modelName}.pt'
-    if os.path.exists(chkptPath) and load:
-        chkpt = torch.load(chkptPath,map_location=device)
-        model.load_state_dict(chkpt['model_state_dict'])
-        opt.load_state_dict(chkpt['opt_state_dict'])
-        EPOCH = chkpt['epoch']
-        bestLoss = chkpt['bestLoss']
-        hist = chkpt['hist']
-        with open(f'./{modelName}_log','a') as f: print("Checkpoint loaded.")
-        if opt.param_groups[0]['lr'] < 1e-6 and resetLr:
-            for param_group in opt.param_groups:
-                param_group['lr'] = lr
-            with open(f'./{modelName}_log','a') as f: print(f"Resetting LR from {opt.param_groups[0]['lr']} to {lr}",file=f)
-    elif predMode:
-        if not os.path.exists(chkptPath): chkptPath = f'./trainedModels/{modelName}.pt'
-        chkpt = torch.load(chkptPath,map_location=device)
-        model.load_state_dict(chkpt['model_state_dict'])
-        print("Checkpoint loaded.")
-        return -1
-    else:
-        EPOCH = 0
-        bestLoss = np.inf
-        hist = []
-        with open(f'./{modelName}_log','w') as f: print("No checkpoint found, starting new model.",file=f)
-    return EPOCH,bestLoss,chkptPath,hist
+# def loadCheckPoint(modelName,model,opt,device,load=False,resetLr=False,lr=5e-5,predMode=False):
+#     chkptPath = f'./{modelName}.pt'
+#     if os.path.exists(chkptPath) and load:
+#         chkpt = torch.load(chkptPath,map_location=device)
+#         model.load_state_dict(chkpt['model_state_dict'])
+#         opt.load_state_dict(chkpt['opt_state_dict'])
+#         EPOCH = chkpt['epoch']
+#         bestLoss = chkpt['bestLoss']
+#         hist = chkpt['hist']
+#         with open(f'./{modelName}_log','a') as f: print("Checkpoint loaded.")
+#         if opt.param_groups[0]['lr'] < 1e-6 and resetLr:
+#             for param_group in opt.param_groups:
+#                 param_group['lr'] = lr
+#             with open(f'./{modelName}_log','a') as f: print(f"Resetting LR from {opt.param_groups[0]['lr']} to {lr}",file=f)
+#     elif predMode:
+#         if not os.path.exists(chkptPath): chkptPath = f'./trainedModels/{modelName}.pt'
+#         chkpt = torch.load(chkptPath,map_location=device)
+#         model.load_state_dict(chkpt['model_state_dict'])
+#         print("Checkpoint loaded.")
+#         return -1
+#     else:
+#         EPOCH = 0
+#         bestLoss = np.inf
+#         hist = []
+#         with open(f'./{modelName}_log','w') as f: print("No checkpoint found, starting new model.",file=f)
+#     return EPOCH,bestLoss,chkptPath,hist

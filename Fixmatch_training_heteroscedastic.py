@@ -118,9 +118,9 @@ def train_fixmatch_heteroscedastic(trainLoader, weak_loader, strong_loader, mode
         weights = weights * confidence_mask  # 应用置信度掩码
         weights = weights / (weights.sum() + epsilon) * weights.numel()  # 归一化（保持总权重不变）
         
-        # 无标签损失：使用 NLL，并用方差加权
-        nll_unlabeled = gaussian_nll_loss(mu_strong, log_var_strong, pseudo_labels)
-        unlabeled_loss = (weights * nll_unlabeled).mean()
+        # 无标签损失：只关心 mu 的一致性（不涉及 var_strong），var_weak 仅作加权
+        consistency_loss = (mu_strong - pseudo_labels) ** 2
+        unlabeled_loss = (weights * consistency_loss).mean()
         
         # 总损失
         total_loss = labeled_loss + lambda_U * unlabeled_loss
