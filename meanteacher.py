@@ -76,7 +76,7 @@ def main():
     print(f"有标签验证样本数量: {len(validLoader.dataset)}")
 
     ##----------------------生成模型----------------------
-    nEpoch = 2000
+    nEpoch = 5000
     modelParam = {
         'HLD': 128,
         'nMLP': 2,

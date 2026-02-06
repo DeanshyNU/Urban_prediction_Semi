@@ -14,7 +14,7 @@ from data_preprocessing import preprocess_unlabeled_data
 from data_generation import dataGen_ESTnet, dataGen_unlabeled_ESTnet
 from data_augmentation import TransformFixMatch
 from models import GNN
-from Fixmatch_training import train_fixmatch_no_uq, test_fixmatch, loadCheckPoint
+from Fixmatch_training_nouq import train_fixmatch_no_uq, test_fixmatch, loadCheckPoint
 from utils import plotHist
 
 # 设备配置
@@ -123,10 +123,11 @@ def main():
             'n_unlabeled': n_unlabeled,
             'nNodes': metadata['nNodes'],
             'nEpoch': nEpoch,
-            'lr': 1e-3,
+            'lr': 5e-4,
             'scheduler_gamma': 0.9992,
-            'lambda_U': 10.0,
-            'ramp_epochs': 30,
+            'lambda_U': 3.0,
+            'ramp_epochs': 100,
+            'lr': 5e-4,
             'output_dir': output_dir,
         }
     )
@@ -143,8 +144,10 @@ def main():
         print("  伪标签: 1次弱增强推理，无置信度过滤", file=f)
         print("  模型: GNN (SAGEConv)", file=f)
         print("  特征: 统一特征向量（动态+静态合并）", file=f)
-        print("  优化: lr=1e-3, 学习率衰减=0.9992", file=f)
-        print("  无标签损失权重: lambda_U=10（带ramp-up）", file=f)
+        print("  优化: lr=5e-4, 学习率衰减=0.9992", file=f)
+        print("  无标签损失权重: lambda_U=3（带ramp-up，100 epochs）", file=f)
+        print("  学习率: 5e-4（降低以稳定训练）", file=f)
+        print("  梯度裁剪: max_norm=1.0（防止梯度爆炸）", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
         print("="*60, file=f)
 
@@ -152,15 +155,15 @@ def main():
     print("步骤4: 开始训练")
     print(f"当前轮次: {EPOCH}, 总轮次: {nEpoch}")
     
-    def rampup_factor(epoch, ramp_ep=30):
+    def rampup_factor(epoch, ramp_ep=100):
         """Ramp-up函数，用于逐渐增加无标签损失的权重"""
         return min(1.0, epoch / ramp_ep)
     
     for epoch in range(EPOCH, nEpoch):
-        ramp = rampup_factor(epoch, 30)
+        ramp = rampup_factor(epoch, 100)
         # 使用FixMatch训练（标准版本，无UQ）
         trainLoss, trainRMSE, _, _ = train_fixmatch_no_uq(
-            trainLoader, weak_loader, strong_loader, model, lossFn, loss_unlabel_fn, opt, scheduler, device, metadata['nNodes'], lambda_U=10 * ramp
+            trainLoader, weak_loader, strong_loader, model, lossFn, loss_unlabel_fn, opt, scheduler, device, metadata['nNodes'], lambda_U=3 * ramp
         )
         validLoss, validRMSE, _, _ = test_fixmatch(
             validLoader, model, lossFn, device, metadata['nNodes']
@@ -186,7 +189,7 @@ def main():
             'valid/rmse_min': validRMSE[2],
             'valid/rmse_max': validRMSE[3],
             'learning_rate': scheduler.get_last_lr()[0],
-            'lambda_U': 10.0 * ramp,
+            'lambda_U': 3.0 * ramp,
             'ramp_factor': ramp,
         })
 

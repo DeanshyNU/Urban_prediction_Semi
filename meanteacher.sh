@@ -13,4 +13,4 @@ source /home/hhz6461/anaconda3/etc/profile.d/conda.sh
 conda activate fixmatch               # 激活你的 Conda 环境
 
 # 运行 Python 脚本
-python mean_teacher.py
+python -u meanteacher.py

@@ -54,7 +54,7 @@ def main():
         'window': 2,  # V2: 从4改为2
         'poolSize': 12,
         'batchSize': 128,
-        'thres': 0.4,  # V2: 从0.1改为0.4
+        'thres': 0.1, 
         'geoFeatures': 'full',
     }
     print("步骤1: 生成有标签和无标签数据集")
@@ -87,7 +87,7 @@ def main():
     print(f"strong_loader长度: {len(strong_loader)}")
 
     ##----------------------生成模型----------------------
-    nEpoch = 2000  # V2: 从5000改为2000
+    nEpoch = 5000
     # 更新模型参数，使用分离特征维度
     modelParam = {
         'HLD': 128,
@@ -102,7 +102,7 @@ def main():
     print("步骤3: 初始化模型、优化器和损失函数")
     model = GNN(modelParam).to(device)  # 使用统一的GNN模型
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9992)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9995)
     lossFn = torch.nn.HuberLoss().to(device)
     loss_unlabel_fn = torch.nn.HuberLoss(reduction='none').to(device)  # V2: 使用reduction='none'以正确应用权重  
 
@@ -133,7 +133,7 @@ def main():
             'nNodes': metadata['nNodes'],
             'nEpoch': nEpoch,
             'lr': 1e-3,
-            'scheduler_gamma': 0.9992,
+            'scheduler_gamma': 0.9995,
             'lambda_U': 10.0,
             'ramp_epochs': 30,
             'n_augments': n_augments,
@@ -156,7 +156,8 @@ def main():
         print("  UQ参数: n_augments=5, epsilon=1e-5", file=f)
         print("  模型: GNN (SAGEConv)", file=f)
         print("  特征: 统一特征向量（动态+静态合并）", file=f)
-        print("  优化: lr=1e-3, 学习率衰减=0.9992", file=f)
+        print("  优化: lr=1e-3, 学习率衰减=0.9995", file=f)
+        print("  图稀疏化阈值: thres=0.1", file=f)
         print("  无标签损失权重: lambda_U=10（带ramp-up）", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
         print("="*60, file=f)
