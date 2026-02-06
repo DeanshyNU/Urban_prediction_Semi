@@ -12,5 +12,5 @@
 source /home/hhz6461/anaconda3/etc/profile.d/conda.sh
 conda activate fixmatch               # 激活你的 Conda 环境
 
-# 运行 Python 脚本
-python -u Fixmatch_training_heteroscedastic.py
+# 运行 Python 脚本（主程序）
+python -u Fixmatch_heteroscedastic_head.py

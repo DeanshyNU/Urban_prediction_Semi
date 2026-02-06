@@ -67,6 +67,9 @@ class GNN(torch.nn.Module):
         # 分离 mu 和 log_var (heteroscedastic head)
         # x 形状: (batch_size * nNodes, 2)
         mu, log_var = torch.split(x, 1, dim=-1)  # 每个都是 (batch_size * nNodes, 1)
+        # 约束 log_var 输出范围，防止方差爆炸
+        # log_var ∈ [-10, 2] → var ∈ [4.5e-5, 7.4]
+        log_var = torch.clamp(log_var, min=-10, max=2)
         return mu, log_var
     
 # def train(loader,model,lossFn,opt,scheduler,device,nNodes):
