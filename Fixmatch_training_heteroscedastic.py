@@ -1,10 +1,11 @@
 """
 训练相关模块（Heteroscedastic版本）
 包含训练、测试和检查点加载功能
-支持不确定性量化：使用 mu 和 log_var 进行 NLL 损失计算
+支持不确定性量化：使用 mu 和 log_var 进行方差加权
 """
 import numpy as np
 import torch
+import torch.nn.functional as F
 import os
 from utils import RMSE
 
@@ -62,9 +63,9 @@ def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=
     return EPOCH, bestLoss, chkptPath, hist
 
 
-def train_fixmatch_heteroscedastic(trainLoader, weak_loader, strong_loader, model, opt, scheduler, device, nNodes, lambda_U=10.0, confidence_threshold=0.1):
+def train_fixmatch_heteroscedastic(trainLoader, weak_loader, strong_loader, model, opt, scheduler, device, nNodes, lambda_U=10.0):
     """
-    FixMatch训练函数（Heteroscedastic版本）：使用方差加权和动态阈值过滤
+    FixMatch训练函数（Heteroscedastic版本）：使用方差加权
     
     参数:
         trainLoader: 有标签数据加载器
@@ -76,7 +77,6 @@ def train_fixmatch_heteroscedastic(trainLoader, weak_loader, strong_loader, mode
         device: 设备
         nNodes: 节点数
         lambda_U: 无标签损失权重
-        confidence_threshold: 置信度阈值（方差阈值），只使用高置信度样本
     """
     model.train()
     total_labeled_loss = 0
@@ -92,33 +92,28 @@ def train_fixmatch_heteroscedastic(trainLoader, weak_loader, strong_loader, mode
         
         opt.zero_grad(set_to_none=True)
         
-        # ========== 有标签损失计算（使用 NLL）==========
+        # ========== 有标签损失计算（使用 MSE）==========
         mu_labeled, log_var_labeled = model(batch.x, batch.edge_index, batch.edge_attr)
-        # mu_labeled, log_var_labeled: (batch_size * nNodes, 1)
-        labeled_loss = gaussian_nll_loss(mu_labeled, log_var_labeled, batch.y).mean()
+        # mu_labeled: (batch_size * nNodes, 1)
+        labeled_loss = F.mse_loss(mu_labeled, batch.y)
         
-        # ========== 无标签损失计算（使用方差加权和动态阈值）==========
+        # ========== 无标签损失计算（使用方差加权）==========
         with torch.no_grad():
             # 弱增强：生成伪标签和不确定性
             mu_weak, log_var_weak = model(weak_batch.x, weak_batch.edge_index, weak_batch.edge_attr)
             var_weak = torch.exp(log_var_weak)  # 方差
-            std_weak = torch.sqrt(var_weak + epsilon)  # 标准差
-            
-            # 动态阈值过滤：只使用高置信度（小方差）的样本
-            confidence_mask = (var_weak < confidence_threshold).float()
             
             # 伪标签：使用 mu_weak
             pseudo_labels = mu_weak
         
-        # 强增强：预测 mu 和 log_var
-        mu_strong, log_var_strong = model(strong_batch.x, strong_batch.edge_index, strong_batch.edge_attr)
+        # 强增强：预测 mu（不需要 log_var_strong）
+        mu_strong, _ = model(strong_batch.x, strong_batch.edge_index, strong_batch.edge_attr)
         
         # 方差加权：weight = 1 / var_weak（方差越小，权重越大）
         weights = 1.0 / (var_weak + epsilon)
-        weights = weights * confidence_mask  # 应用置信度掩码
         weights = weights / (weights.sum() + epsilon) * weights.numel()  # 归一化（保持总权重不变）
         
-        # 无标签损失：只关心 mu 的一致性（不涉及 var_strong），var_weak 仅作加权
+        # 无标签损失：只关心 mu 的一致性，var_weak 仅作加权
         consistency_loss = (mu_strong - pseudo_labels) ** 2
         unlabeled_loss = (weights * consistency_loss).mean()
         

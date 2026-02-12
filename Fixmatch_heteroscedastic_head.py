@@ -92,7 +92,7 @@ def main():
     model_path = os.path.join(output_dir, modelName)
     print("步骤3: 初始化模型、优化器和损失函数")
     model = GNN(modelParam).to(device)  # 使用 Heteroscedastic GNN 模型（返回 mu, log_var）
-    opt = torch.optim.Adam(model.parameters(), lr=5e-4)  # 降低学习率以稳定训练
+    opt = torch.optim.Adam(model.parameters(), lr=1e-4)  # 降低学习率到1e-4以稳定训练
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9995)
     # Heteroscedastic 模型使用 NLL 损失，不需要额外的损失函数  
 
@@ -122,7 +122,7 @@ def main():
             'n_unlabeled': n_unlabeled,
             'nNodes': metadata['nNodes'],
             'nEpoch': nEpoch,
-            'lr': 5e-4,
+            'lr': 1e-4,
             'scheduler_gamma': 0.9995,
             'lambda_U': 3.0,
             'ramp_epochs': 100,
@@ -138,15 +138,14 @@ def main():
         print(f"  实验时间: {current_time}", file=f)
         print(f"  Job ID: {job_id}", file=f)
         print(f"  输出目录: {output_dir}", file=f)
-        print("  方法: FixMatch + Heteroscedastic Head（不确定性量化）", file=f)
+        print("  方法: FixMatch + Heteroscedastic Head（不确定性量化，方案A）", file=f)
         print("  数据增强: weak_m=1.5, strong_m=4.5（UrbanFeature不增强）", file=f)
-        print("  伪标签: 1次弱增强推理，方差加权 + 动态阈值过滤", file=f)
-        print("  损失函数: Gaussian NLL（有标签和无标签都使用）", file=f)
-        print("  权重策略: weight = 1/var_weak（方差越小权重越大）", file=f)
-        print("  置信度阈值: 只使用 var < 0.1 的高置信度样本", file=f)
+        print("  伪标签: 1次弱增强推理，方差加权", file=f)
+        print("  有标签损失: MSE（只优化mu）", file=f)
+        print("  无标签损失: MSE一致性 + 方差加权（weight = 1/var_weak）", file=f)
         print("  模型: GNN Heteroscedastic (SAGEConv, 输出 mu + log_var)", file=f)
         print("  特征: 统一特征向量（动态+静态合并）", file=f)
-        print("  优化: lr=5e-4, 学习率衰减=0.9995", file=f)
+        print("  优化: lr=1e-4, 学习率衰减=0.9995", file=f)
         print("  无标签损失权重: lambda_U=3（带ramp-up，100 epochs）", file=f)
         print("  梯度裁剪: max_norm=1.0（防止梯度爆炸）", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
@@ -165,7 +164,7 @@ def main():
         # 使用FixMatch训练（Heteroscedastic版本）
         trainLoss, trainRMSE, _, _ = train_fixmatch_heteroscedastic(
             trainLoader, weak_loader, strong_loader, model, opt, scheduler, device, 
-            metadata['nNodes'], lambda_U=3 * ramp, confidence_threshold=0.1
+            metadata['nNodes'], lambda_U=3 * ramp
         )
         validLoss, validRMSE, _, _, valid_uncertainty = test_fixmatch_heteroscedastic(
             validLoader, model, device, metadata['nNodes']
