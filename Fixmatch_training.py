@@ -114,14 +114,20 @@ def train_fixmatch_no_uq(trainLoader, weak_loader, strong_loader, model, loss_la
     return avg_labeled_loss + lambda_U * avg_unlabeled_loss, rmse, truth, pred
 
 
-def train_fixmatch_multiple_weak(trainLoader, weak_loaders, strong_loader, model, loss_labeled_fn, loss_unlabeled_fn, 
-                                  opt, scheduler, device, nNodes, lambda_U=10.0):
+def train_fixmatch_multiple_weak(trainLoader, weak_loaders, strong_loader, model, loss_labeled_fn, loss_unlabeled_fn,
+                                  opt, scheduler, device, nNodes, lambda_U=10.0, confidence_threshold=None):
     """
-    FixMatch训练函数（UQ版本）：多次弱增强生成伪标签，方差加权
-    
+    FixMatch训练函数（多次弱增强版本）：
+    用多次弱增强的均值作为伪标签，用标准差做置信度过滤（而非加权）。
+
+    修复说明：
+    - 旧版本用 1/std 做权重，当 std→0 时权重→∞，导致训练爆炸
+    - 新版本用 std 做过滤：只保留 std < threshold 的样本参与无标签损失
+    - 如果 confidence_threshold=None，则自动用当前 batch 的 std 中位数作为阈值
+
     参数:
         trainLoader: 有标签数据加载器
-        weak_loaders: 多个弱增强无标签数据加载器列表（n_augments个不同的弱增强）
+        weak_loaders: 多个弱增强无标签数据加载器列表
         strong_loader: 强增强无标签数据加载器
         model: GNN模型
         loss_labeled_fn: 有标签损失函数
@@ -131,15 +137,14 @@ def train_fixmatch_multiple_weak(trainLoader, weak_loaders, strong_loader, model
         device: 设备
         nNodes: 节点数
         lambda_U: 无标签损失权重
+        confidence_threshold: 标准差阈值，None 表示用自适应中位数
     """
     model.train()
     total_labeled_loss = 0
     total_unlabeled_loss = 0
     total_batches = 0
+    total_mask_ratio = 0  # 追踪有多少样本被保留
     pred, truth = [], []
-    
-    # UQ参数
-    epsilon = 1e-5
 
     # 确保weak_loaders是列表
     if not isinstance(weak_loaders, list):
@@ -150,46 +155,56 @@ def train_fixmatch_multiple_weak(trainLoader, weak_loaders, strong_loader, model
         batch = batch.to(device)
         weak_batches = [wb.to(device) for wb in weak_batches_list]
         strong_batch = strong_batch.to(device)
-        
+
         opt.zero_grad(set_to_none=True)
-        
+
         # 有标签损失计算
         logits = model(batch.x, batch.edge_index, batch.edge_attr)
         labeled_loss = loss_labeled_fn(logits, batch.y)
-        
-        # 无标签损失计算 - 多次弱增强生成伪标签（UQ版本）
+
+        # 无标签损失计算 - 多次弱增强生成伪标签 + 置信度过滤
         with torch.no_grad():
             weak_predictions = []
             for weak_batch in weak_batches:
                 pred_weak = model(weak_batch.x, weak_batch.edge_index, weak_batch.edge_attr)
                 weak_predictions.append(pred_weak)
-            
-            # 计算伪标签和方差
+
+            # 计算伪标签（均值）和不确定性（标准差）
             weak_predictions = torch.stack(weak_predictions)
             pseudo_labels = torch.mean(weak_predictions, dim=0)
             pred_std = torch.std(weak_predictions, dim=0)
-            
-            # 方差越大权重越小
-            weights = 1.0 / (pred_std + epsilon)
-            weights = weights / weights.mean()  # 归一化
+
+            # 置信度过滤：只保留标准差低于阈值的样本
+            if confidence_threshold is None:
+                # 自适应阈值：使用当前 batch 标准差的中位数
+                threshold = torch.median(pred_std)
+            else:
+                threshold = confidence_threshold
+            mask = (pred_std < threshold).float()  # 1=保留, 0=丢弃
 
         logits_strong = model(strong_batch.x, strong_batch.edge_index, strong_batch.edge_attr)
-        # UQ版本：方差加权
+        # 置信度过滤版本：只对高置信度样本计算损失
         point_wise_loss = loss_unlabeled_fn(logits_strong, pseudo_labels)
-        unlabeled_loss = (weights * point_wise_loss).mean()
-        
+        if mask.sum() > 0:
+            unlabeled_loss = (mask * point_wise_loss).sum() / mask.sum()
+        else:
+            unlabeled_loss = torch.tensor(0.0, device=device)
+
         # 总损失
         total_loss = labeled_loss + lambda_U * unlabeled_loss
         total_loss.backward()
+        # 梯度裁剪
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         opt.step()
-        
+
         # reshape操作
         _pred = logits.reshape(-1, nNodes)
         _truth = batch.y.reshape(-1, nNodes)
-        
-        total_labeled_loss += labeled_loss
-        total_unlabeled_loss += unlabeled_loss
-        
+
+        total_labeled_loss += labeled_loss.item()
+        total_unlabeled_loss += unlabeled_loss.item()
+        total_mask_ratio += mask.mean().item()
+
         pred.append(_pred.cpu().detach().numpy())
         truth.append(_truth.cpu().detach().numpy())
         total_batches += 1
@@ -197,15 +212,16 @@ def train_fixmatch_multiple_weak(trainLoader, weak_loaders, strong_loader, model
     scheduler.step()
 
     # 计算平均损失
-    avg_labeled_loss = (total_labeled_loss / total_batches).item()
-    avg_unlabeled_loss = (total_unlabeled_loss / total_batches).item()
+    avg_labeled_loss = total_labeled_loss / total_batches
+    avg_unlabeled_loss = total_unlabeled_loss / total_batches
+    avg_mask_ratio = total_mask_ratio / total_batches
 
     # 计算RMSE
     truth = np.concatenate(truth)
     pred = np.concatenate(pred)
     rmse = RMSE(truth, pred)
 
-    return avg_labeled_loss + lambda_U * avg_unlabeled_loss, rmse, truth, pred
+    return avg_labeled_loss + lambda_U * avg_unlabeled_loss, rmse, truth, pred, avg_mask_ratio
 
 
 def test_fixmatch(loader, model, lossFn, device, nNodes):
