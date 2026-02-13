@@ -438,6 +438,7 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
         'trainIdx': trainSet.indices,
         'validIdx': validSet.indices,
         'AdjMatrix': Adj,
+        'UrbanFeature': features[0, :, rawGeoFeatIdx],  # (nNodes, 17) 静态特征取任一时间步
     }
     
     return trainLoader, validLoader, metadata, validSet
@@ -645,7 +646,8 @@ def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False
         'trainIdx': trainSet.indices,
         'validIdx': validSet.indices,
         'AdjMatrix': Adj,
-        'isLabeled': labeled
+        'isLabeled': labeled,
+        'UrbanFeature': UrbanFeature,  # (nNodes, 17) 已在第519行定义
     }
     
     return trainLoader, validLoader, testLoader, metadata, validSet

@@ -14,7 +14,8 @@ from data_preprocessing import preprocess_unlabeled_data
 from data_generation import dataGen_ESTnet, dataGen_unlabeled_ESTnet
 from data_augmentation import TransformFixMatch
 from models import GNN
-from pimodel_training import train_pimodel, test_pimodel, loadCheckPoint
+from physics_loss import compute_similarity_edge_weights
+from pimodel_physics_training import train_pimodel, test_pimodel, loadCheckPoint
 from utils import plotHist
  
 # 设备配置
@@ -30,7 +31,7 @@ def main():
     job_id = os.environ.get('SLURM_JOB_ID', 'local')
     
     # 创建输出目录：方法名_时间_jobid
-    method_name = 'pimodel'
+    method_name = 'pimodel_physics'
     output_dir = f'./{method_name}_{current_time}_job{job_id}'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -73,12 +74,22 @@ def main():
     aug1_data, _ = augmenter1(unlabeled_data)
     aug2_data, _ = augmenter2(unlabeled_data)
  
-    aug1_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, aug1_data, labeled=False, path=DATA_PATH)
+    aug1_loader, _, _, aug1_metadata, _ = dataGen_unlabeled_ESTnet(dataParam, aug1_data, labeled=False, path=DATA_PATH)
     aug2_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, aug2_data, labeled=False, path=DATA_PATH)
     print(f"第一次增强样本数量: {len(aug1_loader.dataset)}")
     print(f"第二次增强样本数量: {len(aug2_loader.dataset)}")
     print(f"有标签训练样本数量: {len(trainLoader.dataset)}")
     print(f"有标签验证样本数量: {len(validLoader.dataset)}")
+
+    ##----------------------预计算物理一致性损失的相似度权重----------------------
+    print("步骤2.5: 预计算城市地表特征相似度权重")
+    sim_edge_weights_labeled = compute_similarity_edge_weights(
+        metadata['UrbanFeature'], metadata['AdjMatrix'], sigma=0.2)
+    sim_edge_weights_unlabeled = compute_similarity_edge_weights(
+        aug1_metadata['UrbanFeature'], aug1_metadata['AdjMatrix'], sigma=0.2)
+    nNodes_unlabeled = aug1_metadata['nNodes']
+    print(f"有标签图相似度权重数量: {len(sim_edge_weights_labeled)}")
+    print(f"无标签图相似度权重数量: {len(sim_edge_weights_unlabeled)}")
  
     ##----------------------生成模型----------------------
     nEpoch = 5000
@@ -129,6 +140,8 @@ def main():
             'lr': 1e-3,
             'scheduler_gamma': 0.9992,
             'lambda_U': 10.0,
+            'lambda_phys': 0.1,
+            'sigma': 0.2,
             'ramp_epochs': 30,
             'output_dir': output_dir,
         }
@@ -141,11 +154,14 @@ def main():
         print(f"  实验时间: {current_time}", file=f)
         print(f"  Job ID: {job_id}", file=f)
         print(f"  输出目录: {output_dir}", file=f)
-        print("  方法: Π-Model（一致性正则化）", file=f)
+        print("  方法: Π-Model + 物理一致性损失", file=f)
         print("  数据增强: weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5（UrbanFeature不增强）", file=f)
         print("  一致性损失: MSELoss", file=f)
+        print("  物理一致性损失: 基于城市地表特征相似度的残差平滑", file=f)
         print("  优化: lr=1e-3, 学习率衰减=0.9992", file=f)
         print(f"  无标签损失权重: lambda_U（带ramp-up）", file=f)
+        print(f"  物理损失权重: lambda_phys=0.1（带ramp-up）", file=f)
+        print(f"  相似度参数: sigma=0.2", file=f)
         print("  模型: GNN (SAGEConv)", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
         print("  特征: 统一特征向量（动态+静态合并）", file=f)
@@ -161,10 +177,15 @@ def main():
  
     for epoch in range(EPOCH, nEpoch):
         ramp = rampup_factor(epoch, 30)
-        # Π-Model训练
+        # Π-Model训练（带物理一致性损失）
         trainLoss, trainRMSE, _, _ = train_pimodel(
             trainLoader, aug1_loader, aug2_loader, model, lossFn, consistency_loss_fn,
-            opt, scheduler, device, metadata['nNodes'], lambda_U=10.0 * ramp
+            opt, scheduler, device, metadata['nNodes'], 
+            lambda_U=10.0 * ramp,
+            lambda_phys=0.1 * ramp,
+            sim_edge_weights_labeled=sim_edge_weights_labeled,
+            sim_edge_weights_unlabeled=sim_edge_weights_unlabeled,
+            nNodes_unlabeled=nNodes_unlabeled
         )
         validLoss, validRMSE, _, _ = test_pimodel(
             validLoader, model, lossFn, device, metadata['nNodes']
@@ -195,6 +216,7 @@ def main():
             'valid/rmse_max': validRMSE[3],
             'learning_rate': scheduler.get_last_lr()[0],
             'lambda_U': 10.0 * ramp,
+            'lambda_phys': 0.1 * ramp,
             'ramp_factor': ramp,
         })
  

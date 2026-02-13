@@ -32,6 +32,26 @@ def merge_wind_components(data):
     return data
 
 
+def reorder_wrf_to_labeled_order(data):
+    """
+    将无标签WRF变量顺序对齐到有标签数据
+
+    无标签(合并后): [Tair, Tskin, Ttopsoil, Humidity, Irradiance, Wind]
+    有标签:        [Tair, Humidity, Irradiance, Wind, Tskin, Ttopsoil]
+    """
+    WRFMat = data['WRFMat']  # (6624, 54, nNodes)
+    reorder_indices = np.concatenate([
+        np.arange(0, 9),     # Tair → pos 0 (不变)
+        np.arange(27, 36),   # Humidity → pos 1
+        np.arange(36, 45),   # Irradiance → pos 2
+        np.arange(45, 54),   # Wind → pos 3
+        np.arange(9, 18),    # Tskin → pos 4
+        np.arange(18, 27),   # Ttopsoil → pos 5
+    ])
+    data['WRFMat'] = WRFMat[:, reorder_indices, :]
+    return data
+
+
 def reduce_stations(unlabeled_data, target_station_count=500, seed=42):
     """
     削减站点数量，随机选择指定数量的站点
@@ -113,6 +133,10 @@ def preprocess_unlabeled_data(unlabeled_file, target_station_count=500, nTimeste
     # 2. 合并风速分量
     print("正在合并风速分量...")
     unlabeled_data = merge_wind_components(unlabeled_data)
+
+    # 2.5 重排WRF变量顺序，对齐到有标签数据
+    print("正在重排WRF变量顺序（对齐到有标签数据）...")
+    unlabeled_data = reorder_wrf_to_labeled_order(unlabeled_data)
     
     # 3. 统一数据类型为float64（提前转换，确保后续操作在统一类型上进行）
     print("正在统一数据类型...")
