@@ -133,7 +133,7 @@ def main():
         config={
             **dataParam,
             **modelParam,
-            'method': 'PiModel',
+            'method': 'PiModel_Physics',
             'n_unlabeled': n_unlabeled,
             'nNodes': metadata['nNodes'],
             'nEpoch': nEpoch,

@@ -426,6 +426,11 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
     validLoader = DataLoader(validSet, batch_size=len(validSet), shuffle=False)
     
     # 记录元数据（使用统一的 iDim）
+    # 确保 UrbanFeature 节点数与 AdjMatrix 一致
+    urban_feature = features[0, :, rawGeoFeatIdx]  # (nNodes, 17) 所有节点（:），rawGeoFeatIdx对应的特征列
+    assert urban_feature.shape[0] == Adj.shape[0] == Adj.shape[1], \
+        f"UrbanFeature节点数 ({urban_feature.shape[0]}) 与 AdjMatrix节点数 ({Adj.shape[0]}) 不匹配"
+    
     metadata = {
         'nNodes': _nStations,
         'geoOff': _off,
@@ -438,7 +443,7 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
         'trainIdx': trainSet.indices,
         'validIdx': validSet.indices,
         'AdjMatrix': Adj,
-        'UrbanFeature': features[0, :, rawGeoFeatIdx],  # (nNodes, 17) 静态特征取任一时间步
+        'UrbanFeature': urban_feature,  # (nNodes, 17) 静态特征取任一时间步
     }
     
     return trainLoader, validLoader, metadata, validSet

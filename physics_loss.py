@@ -16,9 +16,28 @@ def compute_urban_similarity(urban_features, sigma=0.2):
 
 def compute_similarity_edge_weights(urban_features, adj_matrix, sigma=0.2):
     """预计算每条边的相似度权重，与 dense_to_sparse 的 edge_index 对齐"""
+    nNodes_urban = urban_features.shape[0]
+    nNodes_adj = adj_matrix.shape[0]
+    
+    if nNodes_urban != nNodes_adj:
+        print(f"警告: UrbanFeature节点数 ({nNodes_urban}) 与 AdjMatrix节点数 ({nNodes_adj}) 不匹配")
+        print(f"  使用 AdjMatrix 的节点数 ({nNodes_adj})")
+        # 如果 UrbanFeature 节点数更多，截断；如果更少，报错
+        if nNodes_urban > nNodes_adj:
+            urban_features = urban_features[:nNodes_adj, :]
+        else:
+            raise ValueError(f"UrbanFeature节点数 ({nNodes_urban}) 小于 AdjMatrix节点数 ({nNodes_adj})")
+    
+    nNodes = nNodes_adj
     sim_matrix = compute_urban_similarity(urban_features, sigma=sigma)
     edge_index, _ = dense_to_sparse(torch.FloatTensor(adj_matrix))
     src, dst = edge_index[0].numpy(), edge_index[1].numpy()
+    
+    # 确保索引在有效范围内
+    if src.max() >= nNodes or dst.max() >= nNodes:
+        raise ValueError(f"边索引超出范围: src最大={src.max()}, dst最大={dst.max()}, nNodes={nNodes}, "
+                        f"sim_matrix形状={sim_matrix.shape}, adj_matrix形状={adj_matrix.shape}")
+    
     return torch.FloatTensor(sim_matrix[src, dst])
 
 
