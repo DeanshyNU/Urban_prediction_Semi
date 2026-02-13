@@ -335,13 +335,30 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
     
     # --------------------------节点特征--------------------------
     _raw = mat73.loadmat(f'{path}/GNN_N1_StationMat.mat')['StationMat_se_fill']
-    _raw = np.transpose(_raw, (0, 2, 1))  # Dim: timestep * nNodes * nFeatures
+    print(f"  [DEBUG] StationMat 原始shape: {_raw.shape}  (nNodes应为{_nStations})")
+    # 转置使得维度为: timestep * nNodes * nFeatures
+    # 原始.mat文件可能是 (timestep, nFeatures, nNodes), 需要转置(0,2,1)
+    # 但如果已经是 (timestep, nNodes, nFeatures), 则不需要转置
+    if _raw.shape[1] == _nStations:
+        # 已经是 (timestep, nNodes, nFeatures), 不需要转置
+        print(f"  [DEBUG] 数据已经是 (timestep, nNodes, nFeatures) 格式，跳过转置")
+    elif _raw.shape[2] == _nStations:
+        # 是 (timestep, nFeatures, nNodes), 需要转置
+        _raw = np.transpose(_raw, (0, 2, 1))
+        print(f"  [DEBUG] 转置 (0,2,1) → {_raw.shape}")
+    else:
+        # 都不匹配，尝试转置并报警
+        print(f"  [WARNING] 维度都不匹配 nNodes={_nStations}: shape={_raw.shape}")
+        _raw = np.transpose(_raw, (0, 2, 1))
+        print(f"  [DEBUG] 强制转置 → {_raw.shape}")
+    print(f"  [DEBUG] 最终shape: {_raw.shape}  (期望: timestep, nNodes={_nStations}, nFeatures)")
     nCFDFeats = 54  # WRF变量数量
     cfdIdx = np.arange(nCFDFeats)
-    
+
     # 修改：正确区分静态和动态特征
     # 静态地理特征（不包括最后3个CLMS动态特征）
     rawGeoFeatIdx = np.arange(nCFDFeats + 4, _raw.shape[-1] - 3 - 1)
+    print(f"  [DEBUG] rawGeoFeatIdx: 从{nCFDFeats + 4}到{_raw.shape[-1] - 3 - 1}, 共{len(rawGeoFeatIdx)}个")
     # CLMS动态特征（最后3个）
     clmsIdx = np.arange(_raw.shape[-1] - 3 - 1, _raw.shape[-1] - 1)
     
@@ -426,6 +443,11 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
     validLoader = DataLoader(validSet, batch_size=len(validSet), shuffle=False)
     
     # 记录元数据（使用统一的 iDim）
+    # 确保 UrbanFeature 节点数与 AdjMatrix 一致
+    urban_feature = features[0, :, rawGeoFeatIdx]  # (nNodes, 17) 所有节点（:），rawGeoFeatIdx对应的特征列
+    assert urban_feature.shape[0] == Adj.shape[0] == Adj.shape[1], \
+        f"UrbanFeature节点数 ({urban_feature.shape[0]}) 与 AdjMatrix节点数 ({Adj.shape[0]}) 不匹配"
+    
     metadata = {
         'nNodes': _nStations,
         'geoOff': _off,
@@ -438,6 +460,7 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
         'trainIdx': trainSet.indices,
         'validIdx': validSet.indices,
         'AdjMatrix': Adj,
+        'UrbanFeature': urban_feature,  # (nNodes, 17) 静态特征取任一时间步
     }
     
     return trainLoader, validLoader, metadata, validSet
@@ -645,7 +668,8 @@ def dataGen_unlabeled_ESTnet(dataParam, data, nTrn=0.75, seed=19, predMode=False
         'trainIdx': trainSet.indices,
         'validIdx': validSet.indices,
         'AdjMatrix': Adj,
-        'isLabeled': labeled
+        'isLabeled': labeled,
+        'UrbanFeature': UrbanFeature,  # (nNodes, 17) 已在第519行定义
     }
     
     return trainLoader, validLoader, testLoader, metadata, validSet
