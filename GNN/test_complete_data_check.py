@@ -1095,7 +1095,7 @@ def main():
     print_separator("=" * 80)
     
     # 数据路径
-    DATA_PATH = '/projects/p32685/Fixmatch/data'
+    DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     n_unlabeled = 200  # 默认200个无标签站点
     
     print(f"数据路径: {DATA_PATH}")
@@ -2240,7 +2240,7 @@ def main():
     print_separator("=" * 80)
     
     # 数据路径
-    DATA_PATH = '/projects/p32685/Fixmatch/data'
+    DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     n_unlabeled = 200  # 默认200个无标签站点
     
     print(f"数据路径: {DATA_PATH}")

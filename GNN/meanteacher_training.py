@@ -5,11 +5,10 @@ Mean Teacher训练模块
 import numpy as np
 import torch
 import os
-from collections import defaultdict
 from utils import RMSE
 from copy import deepcopy
-
-
+ 
+ 
 def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=5e-5, predMode=False):
     """
     加载或初始化检查点
@@ -43,8 +42,8 @@ def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=
         with open(f'./{modelName}_log', 'w') as f:
             print("No checkpoint found, starting new model.", file=f)
     return EPOCH, bestLoss, chkptPath, hist
-
-
+ 
+ 
 def update_ema_variables(model, ema_model, alpha, global_step):
     """
     更新教师模型（EMA）的参数
@@ -58,23 +57,16 @@ def update_ema_variables(model, ema_model, alpha, global_step):
     # 使用固定alpha（推荐方案A）
     # 原因：动态调整alpha在global_step=0时会导致alpha=0，训练不稳定
     # 固定alpha=0.999可以保持教师模型的稳定性
-
+    
     for ema_param, param in zip(ema_model.parameters(), model.parameters()):
         ema_param.data.mul_(alpha).add_(param.data, alpha=1 - alpha)
-
-
-def _set_model_nNodes(model, nNodes):
-    """临时设置模型的 nNodes 属性（用于处理不同大小的图）"""
-    if hasattr(model, 'nNodes'):
-        model.nNodes = nNodes
-
-
+ 
+ 
 def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lossFn, consistency_loss_fn,
-                      opt, scheduler, device, nNodes, lambda_U=1.0, alpha=0.999, global_step=0,
-                      unlabeled_nNodes=None):
+                      opt, scheduler, device, nNodes, lambda_U=1.0, alpha=0.999, global_step=0):
     """
     Mean Teacher训练函数
-
+ 
     参数:
         loader: 有标签数据加载器
         unlabeled_loader: 无标签数据加载器
@@ -85,47 +77,30 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
         opt: 优化器
         scheduler: 学习率调度器
         device: 设备
-        nNodes: 有标签数据节点数（用于reshape和RMSE计算）
+        nNodes: 节点数
         lambda_U: 无标签损失权重
         alpha: EMA系数
         global_step: 当前全局步数
-        unlabeled_nNodes: 无标签数据节点数（可选，若不同于nNodes则需指定）
-                          对于GNN模型可不传（SAGEConv自动适配任意图大小）
-                          对于iTransformer等需要reshape的模型必须传
-
-    返回:
-        total_loss, rmse, truth, pred, epoch_debug
     """
     student_model.train()
     teacher_model.eval()  # 教师模型只用于推理，生成稳定的伪标签
-
-    # 如果未指定无标签节点数，默认与有标签相同
-    if unlabeled_nNodes is None:
-        unlabeled_nNodes = nNodes
-
+ 
     total_labeled_loss = 0
     total_consistency_loss = 0
     total_batches = 0
     pred, truth = [], []
-
-    # 调试统计
-    debug_stats = defaultdict(list)
-
+ 
     for batch_idx, (batch, unlabeled_batch) in enumerate(zip(loader, unlabeled_loader)):
         batch = batch.to(device)
         unlabeled_batch = unlabeled_batch.to(device)
-
+ 
         opt.zero_grad(set_to_none=True)
-
-        # 有标签损失计算（学生模型）— nNodes个站点
-        _set_model_nNodes(student_model, nNodes)
+ 
+        # 有标签损失计算（学生模型）
         student_logits = student_model(batch.x, batch.edge_index, batch.edge_attr)
         labeled_loss = lossFn(student_logits, batch.y)
 
-        # 一致性损失计算 — unlabeled_nNodes个站点
-        _set_model_nNodes(student_model, unlabeled_nNodes)
-        _set_model_nNodes(teacher_model, unlabeled_nNodes)
-
+        # 一致性损失计算：学生模型学习教师模型的预测
         with torch.no_grad():
             # 教师模型为无标签数据生成伪标签
             teacher_predictions = teacher_model(
@@ -136,74 +111,56 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
         student_predictions = student_model(
             unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr
         )
-
-        # 恢复为有标签节点数（下一次迭代的labeled forward需要）
-        _set_model_nNodes(student_model, nNodes)
-        _set_model_nNodes(teacher_model, nNodes)
-
+ 
         # 计算一致性损失
         consistency_loss = consistency_loss_fn(student_predictions, teacher_predictions)
-
+ 
         # 总损失
         total_loss = labeled_loss + lambda_U * consistency_loss
         total_loss.backward()
-
-        # 梯度裁剪（防止梯度爆炸）
-        grad_norm_before = torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=float('inf'))
-        torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
-        grad_norm_after = sum(p.grad.norm().item()**2 for p in student_model.parameters() if p.grad is not None)**0.5
-
+ 
         opt.step()
-
+ 
         # 更新教师模型（EMA）
         update_ema_variables(student_model, teacher_model, alpha, global_step + batch_idx)
-
+ 
         # reshape操作
         _pred = student_logits.reshape(-1, nNodes)
         _truth = batch.y.reshape(-1, nNodes)
-
+ 
         total_labeled_loss += labeled_loss.item()
         total_consistency_loss += consistency_loss.item()
-
+ 
         pred.append(_pred.cpu().detach().numpy())
         truth.append(_truth.cpu().detach().numpy())
         total_batches += 1
-
-        # 收集调试统计
-        debug_stats['labeled_loss'].append(labeled_loss.item())
-        debug_stats['consistency_loss'].append(consistency_loss.item())
-        debug_stats['total_loss'].append(total_loss.item())
-        debug_stats['teacher_pred_mean'].append(teacher_predictions.mean().item())
-        debug_stats['teacher_pred_std'].append(teacher_predictions.std().item())
-        debug_stats['student_pred_mean'].append(student_predictions.mean().item())
-        debug_stats['student_pred_std'].append(student_predictions.std().item())
-        debug_stats['student_logits_mean'].append(student_logits.mean().item())
-        debug_stats['student_logits_std'].append(student_logits.std().item())
-        debug_stats['pred_diff_mean'].append((student_predictions - teacher_predictions).abs().mean().item())
-        debug_stats['pred_diff_max'].append((student_predictions - teacher_predictions).abs().max().item())
-        debug_stats['grad_norm_before_clip'].append(grad_norm_before.item() if torch.is_tensor(grad_norm_before) else grad_norm_before)
-        debug_stats['grad_norm_after_clip'].append(grad_norm_after)
-
+ 
+        if batch_idx % 10 == 0:
+            print(f"批次 {batch_idx + 1}: "
+                  f"标签损失 = {labeled_loss.item():.4f}, "
+                  f"一致性损失 = {consistency_loss.item():.4f}, "
+                  f"总损失 = {total_loss.item():.4f}")
+ 
     scheduler.step()
-
+ 
     # 计算平均损失
     avg_labeled_loss = total_labeled_loss / total_batches
     avg_consistency_loss = total_consistency_loss / total_batches
-
-    # 汇总调试统计（取每个epoch的平均值和最大值）
-    epoch_debug = {}
-    for key, values in debug_stats.items():
-        epoch_debug[f'debug/{key}_mean'] = np.mean(values)
-        epoch_debug[f'debug/{key}_max'] = np.max(values)
-
+ 
     # 计算RMSE
     truth = np.concatenate(truth)
     pred = np.concatenate(pred)
     rmse = RMSE(truth, pred)
-
-    return avg_labeled_loss + lambda_U * avg_consistency_loss, rmse, truth, pred, epoch_debug
-
-
+ 
+    # 打印总的统计信息
+    print(f"轮次摘要: "
+          f"平均标签损失 = {avg_labeled_loss:.4f}, "
+          f"平均一致性损失 = {avg_consistency_loss:.4f}, "
+          f"RMSE = {rmse[0]:.4f}")
+ 
+    return avg_labeled_loss + lambda_U * avg_consistency_loss, rmse, truth, pred
+ 
+ 
 def test_meanteacher(loader, model, lossFn, device, nNodes):
     """
     Mean Teacher测试函数（使用教师模型）
@@ -211,10 +168,10 @@ def test_meanteacher(loader, model, lossFn, device, nNodes):
     model.eval()
     total_labeled_loss = 0
     pred, truth = [], []
-
+ 
     if len(loader) == 0:
         raise ValueError("数据加载器为空，无法进行测试。")
-
+ 
     with torch.no_grad():
         for batch in loader:
             if batch.x is None or batch.y is None:
@@ -223,25 +180,25 @@ def test_meanteacher(loader, model, lossFn, device, nNodes):
             batch = batch.to(device)
             # 前向传播 - 使用统一的特征
             logits = model(batch.x, batch.edge_index, batch.edge_attr)
-
+ 
             # 确保输出和标签形状兼容
             logits = logits.reshape(-1, nNodes)
             batch_y = batch.y.reshape(-1, nNodes)
-
+ 
             # 计算损失
             loss = lossFn(logits, batch_y)
             total_labeled_loss += loss.item()
-
+ 
             # 存储预测和真实值用于RMSE计算
             pred.append(logits.cpu().numpy())
             truth.append(batch_y.cpu().numpy())
-
+ 
     # 归一化标签损失
     avg_labeled_loss = total_labeled_loss / len(loader)
-
+ 
     # 计算RMSE
     truth = np.concatenate(truth)
     pred = np.concatenate(pred)
     rmse = RMSE(truth, pred)
-
+ 
     return avg_labeled_loss, rmse, truth, pred

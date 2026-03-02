@@ -426,20 +426,13 @@ def dataGen_ESTnet(dataParam, path, nTrn=0.75, predMode=False):
     validLoader = DataLoader(validSet, batch_size=len(validSet), shuffle=False)
     
     # 记录元数据（使用统一的 iDim）
-    # 确保 UrbanFeature 节点数与 AdjMatrix 一致
-    # 重要：必须使用 features[0, :, rawGeoFeatIdx]（中间有 :），而不是 features[0, rawGeoFeatIdx]
-    print(f"调试: features形状={features.shape}, features[0]形状={features[0].shape}")
-    print(f"调试: rawGeoFeatIdx={rawGeoFeatIdx}, len={len(rawGeoFeatIdx)}")
-    print(f"调试: Adj形状={Adj.shape}, _nNodes={_nNodes}, _nStations={_nStations}")
-    
-    urban_feature = features[0, :, rawGeoFeatIdx]  # (nNodes, 17) 所有节点（:），rawGeoFeatIdx对应的特征列
-    print(f"调试: urban_feature形状={urban_feature.shape}")
-    
+    # 确保 UrbanFeature 节点数与 AdjMatrix 一致，形状应为 (nNodes, nFeatures)
+    urban_feature = features[0, :, rawGeoFeatIdx]  # 尝试 (nNodes, 17)
+    if urban_feature.shape[0] != Adj.shape[0]:
+        # 若 features 为 (T, nFeatures, nNodes)，则结果为 (17, 68)，需转置为 (68, 17)
+        urban_feature = urban_feature.T
     assert urban_feature.shape[0] == Adj.shape[0] == Adj.shape[1], \
-        f"UrbanFeature节点数 ({urban_feature.shape[0]}) 与 AdjMatrix节点数 ({Adj.shape[0]}) 不匹配。\n" \
-        f"  检查：features[0]形状={features[0].shape}, rawGeoFeatIdx长度={len(rawGeoFeatIdx)}, " \
-        f"urban_feature形状={urban_feature.shape}。\n" \
-        f"  确保代码是 features[0, :, rawGeoFeatIdx]（中间有冒号），而不是 features[0, rawGeoFeatIdx]"
+        f"UrbanFeature节点数 ({urban_feature.shape[0]}) 与 AdjMatrix节点数 ({Adj.shape[0]}) 不匹配。"
     
     metadata = {
         'nNodes': _nStations,

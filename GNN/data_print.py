@@ -1,12 +1,12 @@
 """
-打印 /projects/p32685/Fixmatch/data 目录下所有数据文件的信息
+打印项目 data 目录下所有数据文件的信息
 """
 import os
 import numpy as np
 import mat73
 from pathlib import Path
 
-data_path = '/projects/p32685/Fixmatch/data'
+data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
 def print_mat_info(filepath):
     """打印 .mat 文件的信息"""

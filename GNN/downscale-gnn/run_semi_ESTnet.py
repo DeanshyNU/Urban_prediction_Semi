@@ -6,7 +6,7 @@ import wandb
 from datetime import datetime
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
-path = '/projects/p32685/Fixmatch/data'
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
 # 添加完整时间戳和SLURM作业ID到输出文件夹名称
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 job_id = os.environ.get('SLURM_JOB_ID', '')

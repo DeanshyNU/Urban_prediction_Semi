@@ -3,7 +3,7 @@
 ## 目录结构
 
 ```
-/home/hhz6461/Fixmatch/
+Urban_prediction_Semi/
 ├── __init__.py              # 包初始化文件
 ├── main.py                  # 主程序入口
 ├── utils.py                 # 工具函数模块
@@ -63,17 +63,17 @@ FixMatch数据增强策略：
 
 ## 数据路径配置
 
-数据文件位于：`/projects/p32685/Fixmatch/data`
+数据文件位于项目目录下的 `data/` 文件夹。
 
-在 `main.py` 中通过 `DATA_PATH` 常量配置。
+各主程序通过 `DATA_PATH = os.path.join(os.path.dirname(__file__), 'data')` 自动定位。
 
 ## 使用方法
 
 直接运行主程序：
 
 ```bash
-cd /home/hhz6461/Fixmatch
-python main.py
+cd Urban_prediction_Semi
+python Fixmatch_no_UQ.py
 ```
 
 ## 主要改进

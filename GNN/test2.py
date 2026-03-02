@@ -22,7 +22,7 @@ def print_separator(title="", char="=", length=80):
 
 def load_locations():
     """加载三个数据源的位置信息"""
-    data_path = '/projects/p32685/Fixmatch/data'
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     
     # 1. GNN_N1_StationMat.mat - 原始有标签数据
     print("\n正在加载: GNN_N1_StationMat.mat")
@@ -412,8 +412,8 @@ def analyze_location_overlap():
         verify_matching_logic(loc1, loc2, matches_12, "数据源1", "数据源2")
         
         # 提取匹配站点的 Map 和 SimilarityMat
-        data_path = '/projects/p32685/Fixmatch/data'
-        output_path = '/projects/p32685/Fixmatch/data/matched_stations_data.pkl'
+        data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+        output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'matched_stations_data.pkl')
         matched_indices, matched_map, matched_similarity = extract_matched_data(
             matches_12, data_path, output_path
         )
@@ -637,7 +637,7 @@ def check_locations_consistency():
     """检查 GNN_N1_StationMat.mat 和 GNN_N1_AJM.mat 的 Locations 是否相同"""
     print_separator("检查 Locations 一致性", "=", 80)
     
-    data_path = '/projects/p32685/Fixmatch/data'
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     
     # 加载 GNN_N1_StationMat.mat
     print(f"\n正在加载: {data_path}/GNN_N1_StationMat.mat")
@@ -705,7 +705,7 @@ def check_dist_similarity_consistency():
     """检查 GNN_N1_AJM.mat 中位置相同的站点，dist 和 similarity 是否相同"""
     print_separator("检查 dist 和 similarity 一致性", "=", 80)
     
-    data_path = '/projects/p32685/Fixmatch/data'
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     
     # 加载 GNN_N1_AJM.mat
     print(f"\n正在加载: {data_path}/GNN_N1_AJM.mat")
@@ -824,7 +824,7 @@ if __name__ == "__main__":
     
     # 额外验证：检查重复站点的所有特征
     print("\n" + "="*80)
-    data_path = '/projects/p32685/Fixmatch/data'
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
     loc1, loc2, loc3 = load_locations()
     if loc1 is not None:
         # 重新计算匹配以获取matches

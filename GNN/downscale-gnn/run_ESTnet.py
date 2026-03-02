@@ -1,18 +1,19 @@
 import numpy as np
-import torch, pickle, data, network, utils
+import torch, pickle, data, utils
+import network_ESTnet as network
 import os
 import wandb
 from datetime import datetime
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
-path = '/projects/p32685/Fixmatch/data'
+path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
 # 添加完整时间戳和SLURM作业ID到输出文件夹名称
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 job_id = os.environ.get('SLURM_JOB_ID', '')
 if job_id:
-    output_dir = f'./supervised_{timestamp}_job{job_id}'
+    output_dir = f'./supervised_ESTnet_{timestamp}_job{job_id}'
 else:
-    output_dir = f'./supervised_{timestamp}'
+    output_dir = f'./supervised_ESTnet_{timestamp}'
 os.makedirs(output_dir, exist_ok=True)
 
 def main():
@@ -27,20 +28,18 @@ def main():
             'geoFeatures':  'full',
             }
     trainLoader, validLoader, metadata, _ = data.dataGen(dataParam,path)
+    # ESTnet: 动态特征 = CFD + station，静态特征 = rawGeo + embedGeo
+    dynamic_dim = int(metadata['featureIdx']['rawGeo'][0])
+    static_dim = metadata['iDim'] - dynamic_dim
     ##----------------------Generate model----------------------
     nEpoch = 5000
     modelParam = {
             'HLD':      128,
             'nMLP':     2,
-    #-------------------------GNN part----------------------
             'nGNN':     3,
-            'nGAT':     1,
-            'nHeads':   1,
-            'K':        1,
-            'iDim':     metadata['iDim'],
+            'dynamic_dim': dynamic_dim,
+            'static_dim':  static_dim,
             'oDim':     metadata['oDim'],
-            'BN':       False,
-            'Dropout':  False,
     }
     modelName = f'geoEmbed_{dataParam["geoMethod"]}_gconv_full_{dataParam["geoFeatures"]}Geo'
     
@@ -48,7 +47,7 @@ def main():
     wandb.init(
         entity="urban_prediction",
         project="Semi-supervised GNN",
-        name=modelName,
+        name=f'supervised_ESTnet_{modelName}',
         config={
             **dataParam,
             **modelParam,
@@ -56,11 +55,11 @@ def main():
             'nEpoch': 5000,
             'lr': 1e-3,
             'scheduler_gamma': 0.9992,
-            'model_type': 'supervised',
+            'model_type': 'supervised_ESTnet',
         }
     )
     
-    model = (network.GNN(modelParam)).to(device)
+    model = (network.GNN_ESTNet(modelParam)).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt,gamma=0.9992)
     lossFn = torch.nn.HuberLoss().to(device)
@@ -76,8 +75,8 @@ def main():
     with open(f'{output_dir}/{modelName}_log','a') as f: print(model,file=f)
 
     for epoch in range(EPOCH,nEpoch):
-        trainLoss,trainRMSE,_,_ = network.train(trainLoader,model,lossFn,opt,scheduler,device,metadata['nNodes'])
-        validLoss,validRMSE,_,_ = network.test(validLoader,model,lossFn,device,metadata['nNodes'])
+        trainLoss,trainRMSE,_,_ = network.train(trainLoader,model,lossFn,opt,scheduler,device,metadata['nNodes'],dynamic_dim,static_dim)
+        validLoss,validRMSE,_,_ = network.test(validLoader,model,lossFn,device,metadata['nNodes'],dynamic_dim,static_dim)
         with open(f'{output_dir}/{modelName}_log','a') as f: print("", file=f)
         with open(f'{output_dir}/{modelName}_log','a') as f: print (f"Epoch {epoch}: loss {trainLoss:1.4e}/{validLoss:1.4e}; RMSE {trainRMSE[0]:1.3f}/{validRMSE[0]:1.3f}; LR {scheduler.get_last_lr()} ",file=f)
         with open(f'{output_dir}/{modelName}_log','a') as f: print (f"RMSE std: {trainRMSE[1]:1.3f}/{validRMSE[1]:1.3f}; min: {trainRMSE[2]:1.3f}/{validRMSE[2]:1.3f}; max: {trainRMSE[3]:1.3f}/{validRMSE[3]:1.3f};",file=f)
@@ -109,7 +108,8 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'opt_state_dict':   opt.state_dict(),
                 'bestLoss':         bestLoss,
-                }, chkptPath)
+                'hist':             hist,
+            }, chkptPath)
         # Plot training history
         hist.append([trainLoss,validLoss,trainRMSE[0],validRMSE[0]])
         utils.plotHist(hist,modelName,output_dir=output_dir)

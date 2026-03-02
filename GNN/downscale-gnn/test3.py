@@ -1,3 +1,4 @@
+import os
 import mat73
 import numpy as np
 
@@ -93,6 +94,6 @@ def check_urban_feature_nan(file_path):
         traceback.print_exc()
 
 if __name__ == "__main__":
-    data_path = '/projects/p32685/Fixmatch/data/Unlabeled_Finalized.mat'
+    data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'Unlabeled_Finalized.mat')
     check_urban_feature_nan(data_path)
 

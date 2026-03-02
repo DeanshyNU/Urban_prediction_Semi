@@ -12,7 +12,7 @@ geoScoreEmbedList, geoScoreEmbedRankList = [],[]
 geoScoreRawList, geoScoreRawRankList = [],[]
 modelName = f'geoEmbed_average_sage_full_fullGeo'
 output_dir = './supervised baseline'
-data_path = '/projects/p32685/Fixmatch/data'
+data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
 # Load metadata
 metaPath = f'{output_dir}/{modelName}_param.pkl'
 with open(metaPath,'rb') as f:

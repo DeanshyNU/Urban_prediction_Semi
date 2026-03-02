@@ -14,14 +14,14 @@ from data_preprocessing import preprocess_unlabeled_data
 from data_generation import dataGen_ESTnet, dataGen_unlabeled_ESTnet
 from data_augmentation import TransformFixMatch
 from models import GNN
-from Fixmatch_training import train_fixmatch_multiple_weak, test_fixmatch, loadCheckPoint
+from Fixmatch_training import train_fixmatch_no_uq, test_fixmatch, loadCheckPoint
 from utils import plotHist
 
 # 设备配置
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
 
 # 数据路径配置
-DATA_PATH = '/projects/p32685/Fixmatch/data'
+DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
     job_id = os.environ.get('SLURM_JOB_ID', 'local')
     
     # 创建输出目录：方法名_时间_jobid
-    method_name = 'fixmatch_multiple_weak'
+    method_name = 'fixmatch_no_uq'
     output_dir = f'./{method_name}_{current_time}_job{job_id}'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -54,7 +54,7 @@ def main():
         'window': 2,  # V2: 从4改为2
         'poolSize': 12,
         'batchSize': 128,
-        'thres': 0.1, 
+        'thres': 0.4,  # V2: 从0.1改为0.4
         'geoFeatures': 'full',
     }
     print("步骤1: 生成有标签和无标签数据集")
@@ -63,31 +63,22 @@ def main():
     print("\n" + "="*60)
 
     ##----------------------数据增强----------------------
-    print("步骤2: 对无标签数据应用数据增强（UQ版本：生成多个弱增强）")
+    print("步骤2: 对无标签数据应用数据增强")
     # 增强强度：weak_m=1.5（温和），strong_m=4.5（明显更强，保持约1:3比例）
-    n_augments = 5  # 弱增强次数
+    augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42)
+    weak_augmented_data, strong_augmented_data = augmenter(unlabeled_data)
     
-    # 生成强增强（只需要1个）
-    augmenter_strong = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42)
-    _, strong_augmented_data = augmenter_strong(unlabeled_data)
+    weak_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, weak_augmented_data, labeled=False, path=DATA_PATH)
     strong_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, strong_augmented_data, labeled=False, path=DATA_PATH)
-    
-    # 生成多个不同的弱增强（用于UQ）
-    weak_loaders = []
-    for i in range(n_augments):
-        augmenter_weak_i = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42 + i)
-        weak_augmented_data_i, _ = augmenter_weak_i(unlabeled_data)
-        weak_loader_i, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, weak_augmented_data_i, labeled=False, path=DATA_PATH)
-        weak_loaders.append(weak_loader_i)
-    print(f"弱增强样本数量: {len(weak_loaders[0].dataset)} (共{n_augments}个不同的弱增强)")
+    print(f"弱增强样本数量: {len(weak_loader.dataset)}")
     print(f"强增强样本数量: {len(strong_loader.dataset)}")
     print(f"trainLoader长度: {len(trainLoader)}")
     print(f"validLoader长度: {len(validLoader)}")
-    print(f"weak_loader长度: {len(weak_loaders[0])}")     
+    print(f"weak_loader长度: {len(weak_loader)}")     
     print(f"strong_loader长度: {len(strong_loader)}")
 
     ##----------------------生成模型----------------------
-    nEpoch = 5000
+    nEpoch = 2000  # V2: 从5000改为2000
     # 更新模型参数，使用分离特征维度
     modelParam = {
         'HLD': 128,
@@ -102,7 +93,7 @@ def main():
     print("步骤3: 初始化模型、优化器和损失函数")
     model = GNN(modelParam).to(device)  # 使用统一的GNN模型
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9995)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9992)
     lossFn = torch.nn.HuberLoss().to(device)
     loss_unlabel_fn = torch.nn.HuberLoss(reduction='none').to(device)  # V2: 使用reduction='none'以正确应用权重  
 
@@ -128,16 +119,15 @@ def main():
         config={
             **dataParam,
             **modelParam,
-            'method': 'FixMatch_Multiple_Weak',
+            'method': 'FixMatch_No_UQ',
             'n_unlabeled': n_unlabeled,
             'nNodes': metadata['nNodes'],
             'nEpoch': nEpoch,
-            'lr': 1e-3,
-            'scheduler_gamma': 0.9995,
-            'lambda_U': 10.0,
-            'ramp_epochs': 30,
-            'n_augments': n_augments,
-            'epsilon': 1e-5,
+            'lr': 5e-4,
+            'scheduler_gamma': 0.9992,
+            'lambda_U': 3.0,
+            'ramp_epochs': 100,
+            'lr': 5e-4,
             'output_dir': output_dir,
         }
     )
@@ -145,20 +135,19 @@ def main():
     # 在模型初始化后记录配置
     with open(f'./{model_path}_log', 'a') as f:
         print("="*60, file=f)
-        print("FixMatch配置（UQ版本，多次弱增强）:", file=f)
+        print("FixMatch配置（标准版本，无UQ）:", file=f)
         print(f"  实验时间: {current_time}", file=f)
         print(f"  Job ID: {job_id}", file=f)
         print(f"  输出目录: {output_dir}", file=f)
-        print("  方法: FixMatch + Uncertainty Quantification", file=f)
+        print("  方法: FixMatch（弱-强一致性 + 伪标签）", file=f)
         print("  数据增强: weak_m=1.5, strong_m=4.5（UrbanFeature不增强）", file=f)
-        print("  伪标签: 5次弱增强推理，方差加权", file=f)
-        print("  权重策略: weight = 1/(variance + epsilon), 归一化", file=f)
-        print("  UQ参数: n_augments=5, epsilon=1e-5", file=f)
+        print("  伪标签: 1次弱增强推理，无置信度过滤", file=f)
         print("  模型: GNN (SAGEConv)", file=f)
         print("  特征: 统一特征向量（动态+静态合并）", file=f)
-        print("  优化: lr=1e-3, 学习率衰减=0.9995", file=f)
-        print("  图稀疏化阈值: thres=0.1", file=f)
-        print("  无标签损失权重: lambda_U=10（带ramp-up）", file=f)
+        print("  优化: lr=5e-4, 学习率衰减=0.9992", file=f)
+        print("  无标签损失权重: lambda_U=3（带ramp-up，100 epochs）", file=f)
+        print("  学习率: 5e-4（降低以稳定训练）", file=f)
+        print("  梯度裁剪: max_norm=1.0（防止梯度爆炸）", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
         print("="*60, file=f)
 
@@ -166,15 +155,15 @@ def main():
     print("步骤4: 开始训练")
     print(f"当前轮次: {EPOCH}, 总轮次: {nEpoch}")
     
-    def rampup_factor(epoch, ramp_ep=30):
+    def rampup_factor(epoch, ramp_ep=100):
         """Ramp-up函数，用于逐渐增加无标签损失的权重"""
         return min(1.0, epoch / ramp_ep)
     
     for epoch in range(EPOCH, nEpoch):
-        ramp = rampup_factor(epoch, 30)
-        # 使用FixMatch训练（UQ版本：多次弱增强）
-        trainLoss, trainRMSE, _, _ = train_fixmatch_multiple_weak(
-            trainLoader, weak_loaders, strong_loader, model, lossFn, loss_unlabel_fn, opt, scheduler, device, metadata['nNodes'], lambda_U=10 * ramp
+        ramp = rampup_factor(epoch, 100)
+        # 使用FixMatch训练（标准版本，无UQ）
+        trainLoss, trainRMSE, _, _ = train_fixmatch_no_uq(
+            trainLoader, weak_loader, strong_loader, model, lossFn, loss_unlabel_fn, opt, scheduler, device, metadata['nNodes'], lambda_U=3 * ramp
         )
         validLoss, validRMSE, _, _ = test_fixmatch(
             validLoader, model, lossFn, device, metadata['nNodes']
@@ -200,7 +189,7 @@ def main():
             'valid/rmse_min': validRMSE[2],
             'valid/rmse_max': validRMSE[3],
             'learning_rate': scheduler.get_last_lr()[0],
-            'lambda_U': 10.0 * ramp,
+            'lambda_U': 3.0 * ramp,
             'ramp_factor': ramp,
         })
 

@@ -1,3 +1,6 @@
+# Shell 脚本（不上传）
+*.sh
+
 # Python 缓存和编译文件
 __pycache__/
 *.py[cod]
@@ -36,6 +39,8 @@ downscale-gnn/supervised_*/
 *.out
 *.err
 mylog.txt
+*_error.txt
+*_result.txt
 
 # W&B 相关
 wandb/
