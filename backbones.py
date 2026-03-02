@@ -5,6 +5,7 @@
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 
@@ -644,6 +645,9 @@ class ModernTCNBlock(nn.Module):
             nn.BatchNorm1d(d_model),
         )
 
+        # DWConv 后的 dropout（防止空间卷积过拟合）
+        self.dw_dropout = nn.Dropout(dropout)
+
         # 归一化
         self.norm = nn.BatchNorm1d(d_model)
 
@@ -662,6 +666,7 @@ class ModernTCNBlock(nn.Module):
 
         # DWConv: 大核 + 小核重参数化
         x = self.dw_large(x) + self.dw_small(x)
+        x = self.dw_dropout(x)  # 正则化空间卷积输出
         x = self.norm(x)
 
         # ConvFFN
@@ -677,7 +682,7 @@ class ModernTCNModel(nn.Module):
     核心思想：
     1. 反转嵌入: Linear(iDim, d_model)，每个站点的特征映射到隐藏空间
     2. 大核 DWConv: 沿站点维度做深度可分离卷积，捕捉空间模式
-    3. 重参数化: 大核(51) + 小核(5) 并行，改善训练
+    3. 重参数化: 大核 + 小核 并行，改善训练
     4. ConvFFN: 逐点卷积处理每个位置的特征
     5. 多层堆叠: 扩大有效感受野
 
@@ -685,7 +690,9 @@ class ModernTCNModel(nn.Module):
     - 原始: DWConv沿时间维度, FFN2做跨变量交互
     - 本项目: DWConv沿站点维度(空间建模), FFN做特征处理
     - 反转嵌入替代 patch embedding
-    - 大核=51, N=68时覆盖全部站点; N=200时3层有效感受野≈153
+    - 默认 large_kernel=13, 适中感受野避免过拟合
+    - DWConv 后加 Dropout 防止空间卷积记忆训练集
+    - 输出前加 LayerNorm 稳定预测分布
 
     接口: forward(x, edgeIdx=None, edgeAttr=None) 兼容现有训练代码
     """
@@ -696,12 +703,12 @@ class ModernTCNModel(nn.Module):
         oDim = modelPara['oDim']
         d_model = modelPara['HLD']
 
-        # ModernTCN 特有参数
-        large_kernel = modelPara.get('large_kernel', 51)
+        # ModernTCN 特有参数（默认值已调整为正则化版本）
+        large_kernel = modelPara.get('large_kernel', 13)
         small_kernel = modelPara.get('small_kernel', 5)
-        e_layers = modelPara.get('nGNN', 3)
-        d_ff = modelPara.get('d_ff', d_model * 4)
-        dropout = modelPara.get('dropout', 0.1)
+        e_layers = modelPara.get('nGNN', 2)
+        d_ff = modelPara.get('d_ff', d_model * 2)
+        dropout = modelPara.get('dropout', 0.3)
 
         # --- 反转嵌入 ---
         self.input_norm = nn.LayerNorm(iDim)
@@ -713,6 +720,9 @@ class ModernTCNModel(nn.Module):
             ModernTCNBlock(d_model, d_ff, large_kernel, small_kernel, dropout)
             for _ in range(e_layers)
         ])
+
+        # --- 输出前归一化（稳定预测分布） ---
+        self.output_norm = nn.LayerNorm(d_model)
 
         # --- 输出投影 ---
         self.projector = nn.Sequential(
@@ -751,6 +761,151 @@ class ModernTCNModel(nn.Module):
 
         # 转置回来: (B, d_model, N) → (B, N, d_model)
         x = x.permute(0, 2, 1)
+
+        # 输出前归一化
+        x = self.output_norm(x)
+
+        # 输出投影: (B, N, d_model) → (B, N, oDim)
+        x = self.projector(x)
+
+        # Reshape back: (B, N, oDim) → (B*N, oDim)
+        return x.reshape(B * N, -1)
+
+
+# =============================================================================
+# 8. S-Mamba Model (Bidirectional Mamba - Neurocomputing 2024)
+# =============================================================================
+try:
+    from mamba_ssm import Mamba
+    MAMBA_AVAILABLE = True
+except ImportError:
+    MAMBA_AVAILABLE = False
+    print("[WARNING] mamba_ssm 未安装，SMambaModel 不可用。请运行: pip install mamba-ssm")
+
+
+class SMambaEncoderLayer(nn.Module):
+    """
+    S-Mamba 编码器层: 双向Mamba + FFN
+
+    核心操作：
+    - 前向 Mamba: 沿站点序列正向扫描
+    - 反向 Mamba: 沿站点序列反向扫描（flip → Mamba → flip）
+    - 双向融合: forward + backward
+    - FFN: Conv1d(d_model, d_ff) → GELU → Conv1d(d_ff, d_model)
+
+    输入/输出: (B, N, d_model)
+    """
+    def __init__(self, d_model, d_state, d_ff, dropout, activation='gelu'):
+        super(SMambaEncoderLayer, self).__init__()
+        assert MAMBA_AVAILABLE, "mamba_ssm 未安装，无法使用 SMambaEncoderLayer"
+
+        # 双向 Mamba
+        self.mamba_forward = Mamba(
+            d_model=d_model, d_state=d_state, d_conv=2, expand=1
+        )
+        self.mamba_backward = Mamba(
+            d_model=d_model, d_state=d_state, d_conv=2, expand=1
+        )
+
+        # FFN (与原始 S-Mamba 一致: Conv1d pointwise)
+        self.conv1 = nn.Conv1d(d_model, d_ff, kernel_size=1)
+        self.conv2 = nn.Conv1d(d_ff, d_model, kernel_size=1)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = F.gelu if activation == 'gelu' else F.relu
+
+    def forward(self, x):
+        """x: (B, N, d_model)"""
+        # 双向 Mamba: 前向 + 反向
+        new_x = self.mamba_forward(x) + self.mamba_backward(x.flip(dims=[1])).flip(dims=[1])
+        x = x + new_x
+        y = x = self.norm1(x)
+
+        # FFN
+        y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
+        y = self.dropout(self.conv2(y).transpose(-1, 1))
+
+        return self.norm2(x + y)
+
+
+class SMambaModel(nn.Module):
+    """
+    S-Mamba: 双向Mamba时序模型 (Neurocomputing 2024)
+
+    核心思想：
+    1. 反转嵌入: Linear(iDim, d_model)，每个站点的特征映射到隐藏空间
+    2. 双向 Mamba: 前向+反向选择性状态空间扫描，捕捉站点间双向依赖
+    3. FFN: Conv1d 逐点卷积处理特征
+    4. 多层堆叠: 逐步提取更高层次的空间-特征模式
+
+    与原始 S-Mamba 的适配：
+    - 原始: variates作为tokens, seq_len作为embedding维度
+    - 本项目: 站点(nNodes)作为tokens, 特征(iDim)作为embedding维度
+    - 双向 Mamba 沿站点维度扫描: 捕捉空间依赖（不依赖站点顺序固定）
+    - Mamba 对任意序列长度都支持: 天然兼容 68↔200 站点切换
+
+    接口: forward(x, edgeIdx=None, edgeAttr=None) 兼容现有训练代码
+    """
+    def __init__(self, modelPara):
+        super(SMambaModel, self).__init__()
+        assert MAMBA_AVAILABLE, "mamba_ssm 未安装，无法使用 SMambaModel"
+
+        self.nNodes = modelPara['nNodes']
+        iDim = modelPara['iDim']
+        oDim = modelPara['oDim']
+        d_model = modelPara['HLD']
+
+        # S-Mamba 特有参数
+        d_state = modelPara.get('d_state', 16)
+        d_ff = modelPara.get('d_ff', d_model * 4)
+        e_layers = modelPara.get('nGNN', 3)
+        dropout = modelPara.get('dropout', 0.1)
+
+        # --- 反转嵌入 ---
+        self.input_norm = nn.LayerNorm(iDim)
+        self.embedding = nn.Linear(iDim, d_model)
+        self.embed_dropout = nn.Dropout(dropout)
+
+        # --- S-Mamba 编码器层 ---
+        self.layers = nn.ModuleList([
+            SMambaEncoderLayer(d_model, d_state, d_ff, dropout)
+            for _ in range(e_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+
+        # --- 输出投影 ---
+        self.projector = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, oDim),
+        )
+
+    def forward(self, x, edgeIdx=None, edgeAttr=None):
+        """
+        参数:
+            x: (B*N, iDim) — PyG flat format
+            edgeIdx: 不使用
+            edgeAttr: 不使用
+
+        返回:
+            (B*N, oDim)
+        """
+        N = self.nNodes
+        B = x.shape[0] // N
+
+        # Reshape: (B*N, iDim) → (B, N, iDim)
+        x = x.view(B, N, -1)
+
+        # 反转嵌入: (B, N, iDim) → (B, N, d_model)
+        x = self.input_norm(x)
+        x = self.embed_dropout(self.embedding(x))
+
+        # S-Mamba 编码器: 双向 Mamba + FFN
+        for layer in self.layers:
+            x = layer(x)
+        x = self.norm(x)
 
         # 输出投影: (B, N, d_model) → (B, N, oDim)
         x = self.projector(x)

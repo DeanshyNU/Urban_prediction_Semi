@@ -1,6 +1,6 @@
 """
-ModernTCN + Mean Teacher 主程序
-使用 ModernTCN 替换 GNN 作为 backbone，保持 Mean Teacher 半监督学习框架
+S-Mamba + Mean Teacher 主程序
+使用 S-Mamba（双向Mamba）替换 GNN 作为 backbone，保持 Mean Teacher 半监督学习框架
 """
 import os
 import torch
@@ -14,7 +14,7 @@ import wandb
 from data_preprocessing import preprocess_unlabeled_data
 from data_generation import dataGen_ESTnet, dataGen_unlabeled_ESTnet
 from data_augmentation import TransformFixMatch
-from backbones import ModernTCNModel  # 使用 ModernTCN 替换 GNN
+from backbones import SMambaModel  # 使用 S-Mamba 替换 GNN
 from meanteacher_training import train_meanteacher, test_meanteacher, loadCheckPoint
 from utils import plotHist
 
@@ -31,7 +31,7 @@ def main():
     job_id = os.environ.get('SLURM_JOB_ID', 'local')
 
     # 创建输出目录：方法名_时间_jobid
-    method_name = 'ModernTCN_meanteacher'
+    method_name = 'SMamba_meanteacher'
     output_dir = f'./{method_name}_{current_time}_job{job_id}'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -75,30 +75,28 @@ def main():
 
     ##----------------------生成模型----------------------
     nEpoch = 5000
-    early_stop_patience = 200  # 连续200个epoch验证集不改善则停止
     modelParam = {
         'HLD': 128,           # d_model
-        'nMLP': 2,            # 保留（ModernTCN不使用，但保持兼容）
-        'nGNN': 2,            # block层数 (3→2, 减少容量防过拟合)
+        'nMLP': 2,            # 保留（S-Mamba不使用，但保持兼容）
+        'nGNN': 3,            # 编码器层数 (e_layers)
         'iDim': metadata['iDim'],
         'oDim': metadata['oDim'],
-        # ModernTCN 特有参数
-        'nNodes': metadata['nNodes'],  # 站点数
-        'nhead': 8,           # 保留（ModernTCN不使用注意力，但保持兼容）
-        'd_ff': 256,          # FFN隐藏维度 (512→256, 减少容量)
-        'dropout': 0.3,       # dropout (0.1→0.3, 加强正则化)
-        'large_kernel': 13,   # 大核卷积核大小 (51→13, 避免覆盖全部站点)
-        'small_kernel': 5,    # 小核（重参数化分支）
+        # S-Mamba 特有参数
+        'nNodes': metadata['nNodes'],  # 站点数 = token数
+        'nhead': 8,           # 保留（S-Mamba不使用注意力，但保持兼容）
+        'd_ff': 512,          # FFN隐藏维度 (4 * d_model)
+        'dropout': 0.1,
+        'd_state': 16,        # SSM 状态维度
     }
 
-    modelName = f'geoEmbed_{dataParam["geoMethod"]}_ModernTCN_meanteacher_{dataParam["geoFeatures"]}Geo'
+    modelName = f'geoEmbed_{dataParam["geoMethod"]}_SMamba_meanteacher_{dataParam["geoFeatures"]}Geo'
     model_path = os.path.join(output_dir, modelName)
-    print("步骤3: 初始化学生模型和教师模型（ModernTCN）")
+    print("步骤3: 初始化学生模型和教师模型（S-Mamba）")
 
     # 初始化学生模型
-    student_model = ModernTCNModel(modelParam).to(device)
+    student_model = SMambaModel(modelParam).to(device)
     # 初始化教师模型（作为学生模型的副本）
-    teacher_model = ModernTCNModel(modelParam).to(device)
+    teacher_model = SMambaModel(modelParam).to(device)
     # 复制学生模型的初始参数到教师模型
     for teacher_param, student_param in zip(teacher_model.parameters(), student_model.parameters()):
         teacher_param.data.copy_(student_param.data)
@@ -106,7 +104,7 @@ def main():
     for param in teacher_model.parameters():
         param.requires_grad = False
 
-    opt = torch.optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-4)
+    opt = torch.optim.Adam(student_model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9995)
     lossFn = torch.nn.HuberLoss().to(device)
     consistency_loss_fn = torch.nn.MSELoss().to(device)
@@ -140,8 +138,8 @@ def main():
         config={
             **dataParam,
             **modelParam,
-            'method': 'ModernTCN + MeanTeacher',
-            'backbone': 'ModernTCN',
+            'method': 'S-Mamba + MeanTeacher',
+            'backbone': 'S-Mamba',
             'n_unlabeled': n_unlabeled,
             'nNodes': metadata['nNodes'],
             'nEpoch': nEpoch,
@@ -158,17 +156,15 @@ def main():
     # 记录配置
     with open(f'./{model_path}_log', 'a') as f:
         print("="*60, file=f)
-        print("ModernTCN + Mean Teacher 配置:", file=f)
+        print("S-Mamba + Mean Teacher 配置:", file=f)
         print(f"  实验时间: {current_time}", file=f)
         print(f"  Job ID: {job_id}", file=f)
         print(f"  输出目录: {output_dir}", file=f)
         print("  方法: Mean Teacher（教师-学生架构）", file=f)
-        print("  Backbone: ModernTCN (ICLR 2024)", file=f)
-        print(f"  ModernTCN参数: d_model={modelParam['HLD']}, "
+        print("  Backbone: S-Mamba (Neurocomputing 2024)", file=f)
+        print(f"  S-Mamba参数: d_model={modelParam['HLD']}, "
               f"e_layers={modelParam['nGNN']}, d_ff={modelParam['d_ff']}, "
-              f"dropout={modelParam['dropout']}", file=f)
-        print(f"  大核卷积: large_kernel={modelParam['large_kernel']}, "
-              f"small_kernel={modelParam['small_kernel']}", file=f)
+              f"d_state={modelParam['d_state']}, dropout={modelParam['dropout']}", file=f)
         print(f"  站点数(tokens): {metadata['nNodes']}", file=f)
         print(f"  输入特征维度: {metadata['iDim']}", file=f)
         print("  数据增强: weak_n=2, weak_m=1.5（UrbanFeature不增强）", file=f)
@@ -182,7 +178,7 @@ def main():
         print("="*60, file=f)
 
     ##----------------------训练----------------------
-    print("步骤4: 开始 ModernTCN + Mean Teacher 训练")
+    print("步骤4: 开始 S-Mamba + Mean Teacher 训练")
     print(f"当前轮次: {EPOCH}, 总轮次: {nEpoch}")
 
     def rampup_factor(epoch, ramp_ep=100):
@@ -190,8 +186,6 @@ def main():
         return min(1.0, epoch / ramp_ep)
 
     global_step = 0
-    epochs_no_improve = 0  # early stopping 计数器
-    best_valid_rmse_for_es = float('inf')
     for epoch in range(EPOCH, nEpoch):
         ramp = rampup_factor(epoch, 100)
         # Mean Teacher训练
@@ -227,10 +221,6 @@ def main():
                   f"max={epoch_debug.get('debug/pred_diff_max_max',0):1.6f}", file=f)
             print(f"  [DEBUG] grad_norm: before_clip_max={epoch_debug.get('debug/grad_norm_before_clip_max',0):1.4f}, "
                   f"after_clip_max={epoch_debug.get('debug/grad_norm_after_clip_max',0):1.4f}", file=f)
-            # 过拟合差距监控
-            overfit_gap = validRMSE[0] / max(trainRMSE[0], 1e-8)
-            print(f"  [OVERFIT] valid/train ratio={overfit_gap:1.2f}x, "
-                  f"epochs_no_improve={epochs_no_improve}/{early_stop_patience}", file=f)
 
         # 记录到 W&B
         log_dict = {
@@ -251,15 +241,11 @@ def main():
             'global_step': global_step,
         }
         log_dict.update(epoch_debug)
-        log_dict['overfit/valid_train_ratio'] = validRMSE[0] / max(trainRMSE[0], 1e-8)
-        log_dict['overfit/epochs_no_improve'] = epochs_no_improve
         wandb.log(log_dict)
 
-        # 保存最佳模型（保存教师模型）+ Early Stopping
+        # 保存最佳模型（保存教师模型）
         if validRMSE[0] < bestLoss:
             bestLoss = validRMSE[0]
-            epochs_no_improve = 0
-            best_valid_rmse_for_es = validRMSE[0]
             with open(f'./{model_path}_log', 'a') as f:
                 print("模型已保存。", file=f)
             torch.save({
@@ -271,17 +257,6 @@ def main():
                 'hist': hist,
             }, chkptPath)
             wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
-        else:
-            epochs_no_improve += 1
-
-        # Early Stopping 检查
-        if epochs_no_improve >= early_stop_patience:
-            with open(f'./{model_path}_log', 'a') as f:
-                print(f"\n[EARLY STOPPING] 连续 {early_stop_patience} 个 epoch 验证集未改善。"
-                      f"最佳 valid RMSE = {bestLoss:.4f}", file=f)
-            print(f"[EARLY STOPPING] epoch {epoch}, best valid RMSE = {bestLoss:.4f}")
-            wandb.log({'early_stopped': True, 'early_stop_epoch': epoch})
-            break
 
         # 绘制训练历史
         hist.append([trainLoss, validLoss, trainRMSE[0], validRMSE[0]])
