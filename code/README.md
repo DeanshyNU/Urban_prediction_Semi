@@ -61,14 +61,13 @@ code/
 
 ### Supervised GNN (baseline)
 ```bash
-cd code/downscale-gnn
+cd downscale-gnn
 python run.py          # supervised, labeled only
 python run_semi.py     # semi-supervised, labeled + unlabeled
 ```
 
 ### Multi-backbone Mean Teacher (consolidated)
 ```bash
-cd code
 python run_gnn_meanteacher.py           # GNN + Mean Teacher
 python run_itransformer_meanteacher.py  # iTransformer + Mean Teacher
 python run_timemixer_meanteacher.py     # TimeMixer + Mean Teacher
@@ -77,7 +76,6 @@ python run_moderntcn_meanteacher.py     # ModernTCN + Mean Teacher
 
 ### GNN Pi Model (consolidated)
 ```bash
-cd code
 python run_gnn_pimodel.py
 ```
 
@@ -97,7 +95,7 @@ run_{backbone}_{method}.py
 
 ## Data Requirements
 
-Data files (not included) at `data/`:
+Data files (not included) at `../data/`:
 - WRF (54 dims), CLMS (3 dims), UrbanFeature (17 dims), GeoFeatures
 - Total ~83 input features per station per timestep
 - 6624 timesteps (2018 summer + 2019 summer)

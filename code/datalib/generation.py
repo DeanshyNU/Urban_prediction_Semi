@@ -8,7 +8,7 @@ import mat73
 from torch_geometric import utils as pyg_utils
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from geo_features import genGeoFeatures, genGeoFeatures_unlabeled
+from .geo_features import genGeoFeatures, genGeoFeatures_unlabeled
 
 
 def apply_knn_sparsify(adj: np.ndarray, k: int = 8) -> np.ndarray:

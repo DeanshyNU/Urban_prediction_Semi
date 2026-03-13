@@ -101,3 +101,7 @@ slurm-*.err
 config.ini
 secrets.yaml
 .env
+
+# 旧代码和临时文件
+trash/
+project_progress/

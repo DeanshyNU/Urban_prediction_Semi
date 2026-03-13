@@ -1,0 +1,292 @@
+"""
+ModernTCN + Mean Teacher 主程序
+使用 ModernTCN 替换 GNN 作为 backbone，保持 Mean Teacher 半监督学习框架
+"""
+import os
+import torch
+import pickle
+import numpy as np
+from copy import deepcopy
+from datetime import datetime
+import wandb
+
+# 导入自定义模块
+from datalib import preprocess_unlabeled_data, dataGen_ESTnet, dataGen_unlabeled_ESTnet, TransformFixMatch
+from models import ModernTCNModel
+from trainers import train_meanteacher, test_meanteacher, loadCheckPoint
+from utils import plotHist
+
+# 设备配置
+device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
+
+# 数据路径配置
+DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+
+
+def main():
+    # 获取当前时间和 job id
+    current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    job_id = os.environ.get('SLURM_JOB_ID', 'local')
+
+    # 创建输出目录：方法名_时间_jobid
+    method_name = 'ModernTCN_meanteacher'
+    output_dir = f'./{method_name}_{current_time}_job{job_id}'
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    print(f"输出目录: {output_dir}")
+
+    ##----------------------数据预处理----------------------
+    print("步骤0: 预处理无标签数据")
+    unlabeled_file = os.path.join(DATA_PATH, 'Unlabeled_Finalized.mat')
+    n_unlabeled = 200
+    unlabeled_data = preprocess_unlabeled_data(
+        unlabeled_file=unlabeled_file,
+        target_station_count=n_unlabeled,
+        nTimesteps=6624
+    )
+
+    ##----------------------创建数据集----------------------
+    dataParam = {
+        'geoMethod': 'average',
+        'nCompPCA': 40,
+        'window': 2,
+        'poolSize': 12,
+        'batchSize': 128,
+        'thres': 0.1,
+        'geoFeatures': 'full',
+    }
+    print("步骤1: 生成有标签和无标签数据集")
+    trainLoader, validLoader, metadata, _ = dataGen_ESTnet(dataParam, DATA_PATH)
+
+    print("\n" + "="*60)
+
+    ##----------------------数据增强----------------------
+    print("步骤2: 对无标签数据应用数据增强（Mean Teacher）")
+    augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42)
+    augmented_data, _ = augmenter(unlabeled_data)
+
+    unlabeled_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, augmented_data, labeled=False, path=DATA_PATH)
+    print(f"增强后无标签样本数量: {len(unlabeled_loader.dataset)}")
+    print(f"有标签训练样本数量: {len(trainLoader.dataset)}")
+    print(f"有标签验证样本数量: {len(validLoader.dataset)}")
+
+    ##----------------------生成模型----------------------
+    nEpoch = 5000
+    early_stop_patience = 200  # 连续200个epoch验证集不改善则停止
+    modelParam = {
+        'HLD': 128,           # d_model
+        'nMLP': 2,            # 保留（ModernTCN不使用，但保持兼容）
+        'nGNN': 2,            # block层数 (3→2, 减少容量防过拟合)
+        'iDim': metadata['iDim'],
+        'oDim': metadata['oDim'],
+        # ModernTCN 特有参数
+        'nNodes': metadata['nNodes'],  # 站点数
+        'nhead': 8,           # 保留（ModernTCN不使用注意力，但保持兼容）
+        'd_ff': 256,          # FFN隐藏维度 (512→256, 减少容量)
+        'dropout': 0.3,       # dropout (0.1→0.3, 加强正则化)
+        'large_kernel': 13,   # 大核卷积核大小 (51→13, 避免覆盖全部站点)
+        'small_kernel': 5,    # 小核（重参数化分支）
+    }
+
+    modelName = f'geoEmbed_{dataParam["geoMethod"]}_ModernTCN_meanteacher_{dataParam["geoFeatures"]}Geo'
+    model_path = os.path.join(output_dir, modelName)
+    print("步骤3: 初始化学生模型和教师模型（ModernTCN）")
+
+    # 初始化学生模型
+    student_model = ModernTCNModel(modelParam).to(device)
+    # 初始化教师模型（作为学生模型的副本）
+    teacher_model = ModernTCNModel(modelParam).to(device)
+    # 复制学生模型的初始参数到教师模型
+    for teacher_param, student_param in zip(teacher_model.parameters(), student_model.parameters()):
+        teacher_param.data.copy_(student_param.data)
+    # 教师模型不需要梯度
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+
+    opt = torch.optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9995)
+    lossFn = torch.nn.HuberLoss().to(device)
+    consistency_loss_fn = torch.nn.MSELoss().to(device)
+
+    # 加载检查点或初始化训练
+    EPOCH, bestLoss, chkptPath, hist = loadCheckPoint(model_path, student_model, opt, device, load=False)
+
+    # 保存元数据
+    with open(f'./{model_path}_param.pkl', 'wb') as f:
+        pickle.dump(modelParam, f)
+        pickle.dump(dataParam, f)
+        pickle.dump(metadata, f)
+    if torch.cuda.is_available():
+        with open(f'./{model_path}_log', 'a') as f:
+            print(torch.cuda.get_device_name(torch.cuda.current_device()), file=f)
+    with open(f'./{model_path}_log', 'a') as f:
+        print("学生模型架构:", file=f)
+        print(student_model, file=f)
+        # 打印参数量
+        total_params = sum(p.numel() for p in student_model.parameters())
+        trainable_params = sum(p.numel() for p in student_model.parameters() if p.requires_grad)
+        print(f"\n总参数量: {total_params:,}", file=f)
+        print(f"可训练参数量: {trainable_params:,}", file=f)
+
+    # 初始化 W&B
+    run_name = f'{method_name}_{current_time}_job{job_id}'
+    wandb.init(
+        entity="urban_prediction",
+        project="Semi-supervised GNN",
+        name=run_name,
+        config={
+            **dataParam,
+            **modelParam,
+            'method': 'ModernTCN + MeanTeacher',
+            'backbone': 'ModernTCN',
+            'n_unlabeled': n_unlabeled,
+            'nNodes': metadata['nNodes'],
+            'nEpoch': nEpoch,
+            'lr': 1e-3,
+            'scheduler_gamma': 0.9995,
+            'lambda_U': 3.0,
+            'ramp_epochs': 100,
+            'ema_alpha': 0.999,
+            'grad_clip_norm': 1.0,
+            'output_dir': output_dir,
+        }
+    )
+
+    # 记录配置
+    with open(f'./{model_path}_log', 'a') as f:
+        print("="*60, file=f)
+        print("ModernTCN + Mean Teacher 配置:", file=f)
+        print(f"  实验时间: {current_time}", file=f)
+        print(f"  Job ID: {job_id}", file=f)
+        print(f"  输出目录: {output_dir}", file=f)
+        print("  方法: Mean Teacher（教师-学生架构）", file=f)
+        print("  Backbone: ModernTCN (ICLR 2024)", file=f)
+        print(f"  ModernTCN参数: d_model={modelParam['HLD']}, "
+              f"e_layers={modelParam['nGNN']}, d_ff={modelParam['d_ff']}, "
+              f"dropout={modelParam['dropout']}", file=f)
+        print(f"  大核卷积: large_kernel={modelParam['large_kernel']}, "
+              f"small_kernel={modelParam['small_kernel']}", file=f)
+        print(f"  站点数(tokens): {metadata['nNodes']}", file=f)
+        print(f"  输入特征维度: {metadata['iDim']}", file=f)
+        print("  数据增强: weak_n=2, weak_m=1.5（UrbanFeature不增强）", file=f)
+        print("  一致性损失: MSELoss", file=f)
+        print("  优化: lr=1e-3, 学习率衰减=0.9995", file=f)
+        print("  梯度裁剪: max_norm=1.0", file=f)
+        print(f"  无标签损失权重: lambda_U=3.0（带ramp-up, ramp_ep=100）", file=f)
+        print("  EMA系数: alpha=0.999", file=f)
+        print(f"  {n_unlabeled}个无标签站点", file=f)
+        print("  特征: 统一特征向量（动态+静态合并）", file=f)
+        print("="*60, file=f)
+
+    ##----------------------训练----------------------
+    print("步骤4: 开始 ModernTCN + Mean Teacher 训练")
+    print(f"当前轮次: {EPOCH}, 总轮次: {nEpoch}")
+
+    def rampup_factor(epoch, ramp_ep=100):
+        """Ramp-up函数，用于逐渐增加无标签损失的权重"""
+        return min(1.0, epoch / ramp_ep)
+
+    global_step = 0
+    epochs_no_improve = 0  # early stopping 计数器
+    best_valid_rmse_for_es = float('inf')
+    for epoch in range(EPOCH, nEpoch):
+        ramp = rampup_factor(epoch, 100)
+        # Mean Teacher训练
+        trainLoss, trainRMSE, _, _, epoch_debug = train_meanteacher(
+            trainLoader, unlabeled_loader, student_model, teacher_model, lossFn, consistency_loss_fn,
+            opt, scheduler, device, metadata['nNodes'], lambda_U=3.0 * ramp, alpha=0.999,
+            global_step=global_step, unlabeled_nNodes=n_unlabeled
+        )
+        # 使用教师模型进行验证
+        validLoss, validRMSE, _, _ = test_meanteacher(
+            validLoader, teacher_model, lossFn, device, metadata['nNodes']
+        )
+
+        global_step += len(trainLoader)
+
+        # 记录结果 + 调试信息
+        with open(f'./{model_path}_log', 'a') as f:
+            print("", file=f)
+            print(f"轮次 {epoch}: 损失 {trainLoss:1.4e}/{validLoss:1.4e}; "
+                  f"RMSE {trainRMSE[0]:1.3f}/{validRMSE[0]:1.3f}; "
+                  f"学习率 {scheduler.get_last_lr()[0]:1.6f}; ramp={ramp:1.3f}", file=f)
+            print(f"RMSE 标准差: {trainRMSE[1]:1.3f}/{validRMSE[1]:1.3f}; "
+                  f"最小值: {trainRMSE[2]:1.3f}/{validRMSE[2]:1.3f}; "
+                  f"最大值: {trainRMSE[3]:1.3f}/{validRMSE[3]:1.3f};", file=f)
+            # 调试信息
+            print(f"  [DEBUG] labeled_loss={epoch_debug.get('debug/labeled_loss_mean',0):1.4e} | "
+                  f"consistency_loss={epoch_debug.get('debug/consistency_loss_mean',0):1.4e}", file=f)
+            print(f"  [DEBUG] teacher_pred: mean={epoch_debug.get('debug/teacher_pred_mean_mean',0):1.4f}, "
+                  f"std={epoch_debug.get('debug/teacher_pred_std_mean',0):1.4f}", file=f)
+            print(f"  [DEBUG] student_pred: mean={epoch_debug.get('debug/student_pred_mean_mean',0):1.4f}, "
+                  f"std={epoch_debug.get('debug/student_pred_std_mean',0):1.4f}", file=f)
+            print(f"  [DEBUG] pred_diff: mean={epoch_debug.get('debug/pred_diff_mean_mean',0):1.6f}, "
+                  f"max={epoch_debug.get('debug/pred_diff_max_max',0):1.6f}", file=f)
+            print(f"  [DEBUG] grad_norm: before_clip_max={epoch_debug.get('debug/grad_norm_before_clip_max',0):1.4f}, "
+                  f"after_clip_max={epoch_debug.get('debug/grad_norm_after_clip_max',0):1.4f}", file=f)
+            # 过拟合差距监控
+            overfit_gap = validRMSE[0] / max(trainRMSE[0], 1e-8)
+            print(f"  [OVERFIT] valid/train ratio={overfit_gap:1.2f}x, "
+                  f"epochs_no_improve={epochs_no_improve}/{early_stop_patience}", file=f)
+
+        # 记录到 W&B
+        log_dict = {
+            'epoch': epoch,
+            'train/loss': trainLoss,
+            'train/rmse': trainRMSE[0],
+            'train/rmse_std': trainRMSE[1],
+            'train/rmse_min': trainRMSE[2],
+            'train/rmse_max': trainRMSE[3],
+            'valid/loss': validLoss,
+            'valid/rmse': validRMSE[0],
+            'valid/rmse_std': validRMSE[1],
+            'valid/rmse_min': validRMSE[2],
+            'valid/rmse_max': validRMSE[3],
+            'learning_rate': scheduler.get_last_lr()[0],
+            'lambda_U': 3.0 * ramp,
+            'ramp_factor': ramp,
+            'global_step': global_step,
+        }
+        log_dict.update(epoch_debug)
+        log_dict['overfit/valid_train_ratio'] = validRMSE[0] / max(trainRMSE[0], 1e-8)
+        log_dict['overfit/epochs_no_improve'] = epochs_no_improve
+        wandb.log(log_dict)
+
+        # 保存最佳模型（保存教师模型）+ Early Stopping
+        if validRMSE[0] < bestLoss:
+            bestLoss = validRMSE[0]
+            epochs_no_improve = 0
+            best_valid_rmse_for_es = validRMSE[0]
+            with open(f'./{model_path}_log', 'a') as f:
+                print("模型已保存。", file=f)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': teacher_model.state_dict(),
+                'student_state_dict': student_model.state_dict(),
+                'opt_state_dict': opt.state_dict(),
+                'bestLoss': bestLoss,
+                'hist': hist,
+            }, chkptPath)
+            wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
+        else:
+            epochs_no_improve += 1
+
+        # Early Stopping 检查
+        if epochs_no_improve >= early_stop_patience:
+            with open(f'./{model_path}_log', 'a') as f:
+                print(f"\n[EARLY STOPPING] 连续 {early_stop_patience} 个 epoch 验证集未改善。"
+                      f"最佳 valid RMSE = {bestLoss:.4f}", file=f)
+            print(f"[EARLY STOPPING] epoch {epoch}, best valid RMSE = {bestLoss:.4f}")
+            wandb.log({'early_stopped': True, 'early_stop_epoch': epoch})
+            break
+
+        # 绘制训练历史
+        hist.append([trainLoss, validLoss, trainRMSE[0], validRMSE[0]])
+        plotHist(hist, model_path)
+
+    print("训练完成")
+
+
+if __name__ == "__main__":
+    main()
