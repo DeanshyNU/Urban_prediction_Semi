@@ -1,8 +1,8 @@
 """
-GNN Model (SAGEConv-based encoder-processor-decoder)
+GNN Model (SAGEConv or GraphConv encoder-processor-decoder)
 """
 import torch
-from torch_geometric.nn import SAGEConv
+from torch_geometric.nn import SAGEConv, GraphConv
 
 
 class GNN(torch.nn.Module):
@@ -12,6 +12,7 @@ class GNN(torch.nn.Module):
         self.nGNNLayers = modelPara['nGNN']
         self.nMLPLayers = modelPara['nMLP']
         _HLD = modelPara['HLD']
+        self.conv_type = modelPara.get('conv_type', 'sage')
         _encoder, _processor, _decoder = [], [], []
 
         for _n in range(self.nMLPLayers):
@@ -23,7 +24,10 @@ class GNN(torch.nn.Module):
         for _n in range(self.nGNNLayers):
             _inputChannel = _HLD
             _outputChannel = _HLD
-            _processor.append(SAGEConv(_inputChannel, _outputChannel, aggr="mean"))
+            if self.conv_type == 'graphconv':
+                _processor.append(GraphConv(_inputChannel, _outputChannel, aggr="mean"))
+            else:
+                _processor.append(SAGEConv(_inputChannel, _outputChannel, aggr="mean"))
             _processor.append(torch.nn.PReLU(_outputChannel))
 
         for _n in range(self.nMLPLayers):
@@ -40,7 +44,10 @@ class GNN(torch.nn.Module):
         for _f in self.encoder:
             x = _f(x)
         for _n, _f in enumerate(self.processor):
-            x = _f(x, edgeIdx) if not _n % 2 else _f(x)
+            if not _n % 2:
+                x = _f(x, edgeIdx, edgeAttr) if self.conv_type == 'graphconv' else _f(x, edgeIdx)
+            else:
+                x = _f(x)
         for _f in self.decoder:
             x = _f(x)
         return x

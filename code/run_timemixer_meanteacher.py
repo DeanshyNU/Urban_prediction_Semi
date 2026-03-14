@@ -30,7 +30,7 @@ def main():
 
     # 创建输出目录：方法名_时间_jobid
     method_name = 'TimeMixer_meanteacher'
-    output_dir = f'./{method_name}_{current_time}_job{job_id}'
+    output_dir = f'/home/hhz6461/Urban_prediction_Semi/log/{method_name}_{current_time}_job{job_id}'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 

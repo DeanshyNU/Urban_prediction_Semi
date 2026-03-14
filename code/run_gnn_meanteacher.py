@@ -28,9 +28,12 @@ def main():
     current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     job_id = os.environ.get('SLURM_JOB_ID', 'local')
 
+    # 读取卷积类型（默认 sage，可通过环境变量 CONV_TYPE=graphconv 切换）
+    conv_type = os.environ.get('CONV_TYPE', 'sage')
+
     # 创建输出目录：方法名_时间_jobid
-    method_name = 'meanteacher'
-    output_dir = f'./{method_name}_{current_time}_job{job_id}'
+    method_name = f'meanteacher_{conv_type}'
+    output_dir = f'/home/hhz6461/Urban_prediction_Semi/log/{method_name}_{current_time}_job{job_id}'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -81,6 +84,7 @@ def main():
         'nGNN': 3,
         'iDim': metadata['iDim'],  # 使用统一特征维度
         'oDim': metadata['oDim'],
+        'conv_type': conv_type,
     }
 
     modelName = f'geoEmbed_{dataParam["geoMethod"]}_meanteacher_{dataParam["geoFeatures"]}Geo'
