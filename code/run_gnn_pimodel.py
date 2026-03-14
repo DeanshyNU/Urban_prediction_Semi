@@ -10,7 +10,7 @@ from datetime import datetime
 import wandb
 
 # 导入自定义模块
-from datalib import preprocess_unlabeled_data, dataGen_ESTnet, dataGen_unlabeled_ESTnet, TransformFixMatch
+from datalib import preprocess_unlabeled_data, dataGen, dataGen_unlabeled, TransformFixMatch
 from models import GNN
 from trainers import train_pimodel, test_pimodel, loadCheckPoint_pi as loadCheckPoint
 from utils import plotHist
@@ -56,7 +56,7 @@ def main():
         'geoFeatures': 'full',
     }
     print("步骤1: 生成有标签和无标签数据集")
-    trainLoader, validLoader, metadata, _ = dataGen_ESTnet(dataParam, DATA_PATH)
+    trainLoader, validLoader, metadata, _ = dataGen(dataParam, DATA_PATH)
 
     print("\n" + "="*60)
 
@@ -71,8 +71,8 @@ def main():
     aug1_data, _ = augmenter1(unlabeled_data)
     aug2_data, _ = augmenter2(unlabeled_data)
 
-    aug1_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, aug1_data, labeled=False, path=DATA_PATH)
-    aug2_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, aug2_data, labeled=False, path=DATA_PATH)
+    aug1_loader, _, _, _, _ = dataGen_unlabeled(dataParam, aug1_data, labeled=False, path=DATA_PATH, labeled_metadata=metadata)
+    aug2_loader, _, _, _, _ = dataGen_unlabeled(dataParam, aug2_data, labeled=False, path=DATA_PATH, labeled_metadata=metadata)
     print(f"第一次增强样本数量: {len(aug1_loader.dataset)}")
     print(f"第二次增强样本数量: {len(aug2_loader.dataset)}")
     print(f"有标签训练样本数量: {len(trainLoader.dataset)}")

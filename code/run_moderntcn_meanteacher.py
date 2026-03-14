@@ -11,7 +11,7 @@ from datetime import datetime
 import wandb
 
 # 导入自定义模块
-from datalib import preprocess_unlabeled_data, dataGen_ESTnet, dataGen_unlabeled_ESTnet, TransformFixMatch
+from datalib import preprocess_unlabeled_data, dataGen, dataGen_unlabeled, TransformFixMatch
 from models import ModernTCNModel
 from trainers import train_meanteacher, test_meanteacher, loadCheckPoint
 from utils import plotHist
@@ -57,7 +57,7 @@ def main():
         'geoFeatures': 'full',
     }
     print("步骤1: 生成有标签和无标签数据集")
-    trainLoader, validLoader, metadata, _ = dataGen_ESTnet(dataParam, DATA_PATH)
+    trainLoader, validLoader, metadata, _ = dataGen(dataParam, DATA_PATH)
 
     print("\n" + "="*60)
 
@@ -66,7 +66,7 @@ def main():
     augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42)
     augmented_data, _ = augmenter(unlabeled_data)
 
-    unlabeled_loader, _, _, _, _ = dataGen_unlabeled_ESTnet(dataParam, augmented_data, labeled=False, path=DATA_PATH)
+    unlabeled_loader, _, _, _, _ = dataGen_unlabeled(dataParam, augmented_data, labeled=False, path=DATA_PATH, labeled_metadata=metadata)
     print(f"增强后无标签样本数量: {len(unlabeled_loader.dataset)}")
     print(f"有标签训练样本数量: {len(trainLoader.dataset)}")
     print(f"有标签验证样本数量: {len(validLoader.dataset)}")
