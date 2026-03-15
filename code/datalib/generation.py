@@ -348,6 +348,166 @@ def dataGen_unlabeled(dataParam, data, nTrn=0.75, seed=19, predMode=False,
 
 
 # ============================================================
+# dataGen_unified: 统一图结构（labeled + unlabeled 合并为268节点大图）
+# labeled 在前（0:n_labeled），unlabeled 在后（n_labeled:total_nodes）
+# ============================================================
+
+def dataGen_unified(dataParam, path, unlabeled_data, nTrn=0.75, seed=19, predMode=False):
+    """
+    统一图结构：将68个有标签节点和200个无标签节点合并为268节点的大图
+    每个时间步生成一个 Data 对象，包含 labeled_mask 和 unlabeled_mask
+
+    Args:
+        dataParam: 数据参数字典
+        path: 有标签数据路径
+        unlabeled_data: 预处理（+增强）后的无标签数据字典
+        nTrn: 训练集比例
+        seed: 随机种子
+        predMode: 预测模式
+    """
+    _window = dataParam['window']
+    _batchSize = dataParam['batchSize']
+    n_unlabeled = unlabeled_data['Map'].shape[0]
+
+    # 1. Geo features（统一用有标签的归一化参数）
+    _geoFeatures_labeled, _off, _scl, _nStations = genGeoFeatures(
+        path, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA']
+    )
+    _geoFeatures_unlabeled, _, _, _ = genGeoFeatures_unlabeled(
+        unlabeled_data, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'],
+        norm_off=_off, norm_scl=_scl
+    )
+
+    # 2. 构建统一图
+    unified_adj, labeled_indices, unlabeled_indices, _ = build_unified_graph(
+        dataParam, path, unlabeled_data, n_unlabeled=n_unlabeled
+    )
+    n_labeled = len(labeled_indices)
+    total_nodes = n_labeled + n_unlabeled
+    edgeIdxV, edgeAttrV = pyg_utils.dense_to_sparse(torch.FloatTensor(unified_adj))
+
+    # 3. 有标签节点特征
+    _raw = mat73.loadmat(f'{path}/GNN_N1_StationMat.mat')['StationMat_se_fill']
+    _raw = np.transpose(_raw, (0, 2, 1))      # (T, n_labeled, nFeatures)
+    nCFDFeats = 54
+    nStationFeats = 4
+    cfdIdx = np.arange(nCFDFeats)
+    stationFeatIdx = np.arange(nCFDFeats, nCFDFeats + nStationFeats)
+    rawGeoFeatIdx = np.arange(nCFDFeats + nStationFeats, _raw.shape[-1] - 1)
+    labeled_features = _raw[:, :, 1:]         # (T, n_labeled, nFeats)
+    labeled_targets = _raw[:, :, 0]           # (T, n_labeled)
+    stationFeatLen = nStationFeats
+    rawGeoFeatLen = len(rawGeoFeatIdx)
+
+    # 4. 无标签节点特征
+    WRFMat = unlabeled_data['WRFMat']             # (T, 54, n_unlabeled)
+    CLMSMat = unlabeled_data['CLMSMat']           # (T, 3, n_unlabeled)
+    UrbanFeature = unlabeled_data['UrbanFeature']  # (n_unlabeled, 17)
+    cfd_unlabeled = np.transpose(WRFMat, (0, 2, 1))    # (T, n_unlabeled, 54)
+    clms_unlabeled = np.transpose(CLMSMat, (0, 2, 1))  # (T, n_unlabeled, 3)
+
+    T = len(labeled_features)
+    assert len(cfd_unlabeled) == T
+
+    # 静态 mask（每个时间步复用）
+    labeled_mask = torch.zeros(total_nodes, dtype=torch.bool)
+    labeled_mask[labeled_indices] = True
+    unlabeled_mask = torch.zeros(total_nodes, dtype=torch.bool)
+    unlabeled_mask[unlabeled_indices] = True
+
+    # 5. 构建 PyG 数据集
+    _dataset = []
+    for n in range(_window, T - _window):
+        # 有标签节点特征
+        _feat_l = labeled_features[n]
+        _tdb_l = labeled_features[n - _window:n, :, cfdIdx]
+        _tdb_l = np.transpose(_tdb_l, (1, 0, 2)).reshape(n_labeled, -1)
+        _tdf_l = labeled_features[n:n + _window, :, cfdIdx]
+        _tdf_l = np.transpose(_tdf_l, (1, 0, 2)).reshape(n_labeled, -1)
+
+        if dataParam['geoFeatures'] == 'full':
+            _x_l = np.hstack([_feat_l[:, cfdIdx], _tdb_l, _tdf_l,
+                               _feat_l[:, stationFeatIdx], _feat_l[:, rawGeoFeatIdx],
+                               _geoFeatures_labeled])
+        elif dataParam['geoFeatures'] == 'raw':
+            _x_l = np.hstack([_feat_l[:, cfdIdx], _tdb_l, _tdf_l,
+                               _feat_l[:, stationFeatIdx], _feat_l[:, rawGeoFeatIdx]])
+        elif dataParam['geoFeatures'] == 'embed':
+            _x_l = np.hstack([_feat_l[:, cfdIdx], _tdb_l, _tdf_l,
+                               _feat_l[:, stationFeatIdx], _geoFeatures_labeled])
+        elif dataParam['geoFeatures'] == 'no':
+            _x_l = np.hstack([_feat_l[:, cfdIdx], _tdb_l, _tdf_l,
+                               _feat_l[:, stationFeatIdx]])
+        else:
+            raise RuntimeError('Geo feature option does not exist.')
+
+        # 无标签节点特征（zero-padding 对齐 iDim）
+        _cfd_u = cfd_unlabeled[n]
+        _clms_u = clms_unlabeled[n]
+        _tdb_u = cfd_unlabeled[n - _window:n]
+        _tdb_u = np.transpose(_tdb_u, (1, 0, 2)).reshape(n_unlabeled, -1)
+        _tdf_u = cfd_unlabeled[n:n + _window]
+        _tdf_u = np.transpose(_tdf_u, (1, 0, 2)).reshape(n_unlabeled, -1)
+
+        _station_u = np.zeros((n_unlabeled, stationFeatLen))
+        _station_u[:, :clms_unlabeled.shape[2]] = _clms_u
+        _rawGeo_u = np.zeros((n_unlabeled, rawGeoFeatLen))
+        _rawGeo_u[:, :UrbanFeature.shape[1]] = UrbanFeature
+
+        if dataParam['geoFeatures'] == 'full':
+            _x_u = np.hstack([_cfd_u, _tdb_u, _tdf_u, _station_u, _rawGeo_u, _geoFeatures_unlabeled])
+        elif dataParam['geoFeatures'] == 'raw':
+            _x_u = np.hstack([_cfd_u, _tdb_u, _tdf_u, _station_u, _rawGeo_u])
+        elif dataParam['geoFeatures'] == 'embed':
+            _x_u = np.hstack([_cfd_u, _tdb_u, _tdf_u, _station_u, _geoFeatures_unlabeled])
+        elif dataParam['geoFeatures'] == 'no':
+            _x_u = np.hstack([_cfd_u, _tdb_u, _tdf_u, _station_u])
+
+        # 合并节点：labeled 在前，unlabeled 在后
+        _x = np.vstack([_x_l, _x_u])              # (total_nodes, iDim)
+        _target = labeled_targets[n].reshape(-1, 1)  # (n_labeled, 1)
+
+        _dataset.append(Data(
+            x=torch.FloatTensor(_x),
+            y=torch.FloatTensor(_target),
+            edge_index=edgeIdxV,
+            edge_attr=edgeAttrV,
+            labeled_mask=labeled_mask,
+            unlabeled_mask=unlabeled_mask,
+        ))
+
+    # 数据集分割
+    _generator = torch.Generator().manual_seed(seed)
+    _trainLength = int(len(_dataset) * nTrn)
+    _validLength = len(_dataset) - _trainLength
+    trainSet, validSet = torch.utils.data.random_split(
+        _dataset, [_trainLength, _validLength], _generator
+    )
+    trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=not predMode)
+    validLoader = DataLoader(validSet, batch_size=len(validSet), shuffle=False)
+
+    metadata = {
+        'nNodes':         _nStations,
+        'n_labeled':      n_labeled,
+        'n_unlabeled':    n_unlabeled,
+        'total_nodes':    total_nodes,
+        'geoOff':         _off,
+        'geoScl':         _scl,
+        'iDim':           _x_l.shape[-1],
+        'oDim':           1,
+        'geoMethod':      dataParam['geoMethod'],
+        'poolSize':       dataParam['poolSize'],
+        'nCompPCA':       dataParam['nCompPCA'],
+        'trainIdx':       trainSet.indices,
+        'validIdx':       validSet.indices,
+        'AdjMatrix':      unified_adj,
+        'stationFeatLen': stationFeatLen,
+        'rawGeoFeatLen':  rawGeoFeatLen,
+    }
+    return trainLoader, validLoader, metadata, validSet
+
+
+# ============================================================
 # 统一图相关函数（保留，暂不使用）
 # ============================================================
 

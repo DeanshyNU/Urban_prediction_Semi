@@ -172,6 +172,118 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
     return avg_labeled_loss + lambda_U * avg_consistency_loss, rmse, truth, pred, epoch_debug
 
 
+def train_meanteacher_unified(loader, student_model, teacher_model, lossFn, consistency_loss_fn,
+                              opt, scheduler, device, n_labeled, lambda_U=1.0, alpha=0.999,
+                              global_step=0):
+    """
+    统一图版本的 Mean Teacher 训练函数
+    loader 中每个 Data 包含 labeled_mask 和 unlabeled_mask
+    """
+    student_model.train()
+    teacher_model.eval()
+
+    total_labeled_loss = 0
+    total_consistency_loss = 0
+    total_batches = 0
+    pred, truth = [], []
+    debug_stats = defaultdict(list)
+
+    for batch_idx, batch in enumerate(loader):
+        batch = batch.to(device)
+        opt.zero_grad(set_to_none=True)
+
+        # 整图前向（student 和 teacher）
+        all_student = student_model(batch.x, batch.edge_index, batch.edge_attr)
+        with torch.no_grad():
+            all_teacher = teacher_model(batch.x, batch.edge_index, batch.edge_attr)
+
+        # 用 mask 提取 labeled / unlabeled 节点
+        labeled_pred = all_student[batch.labeled_mask]
+        unlabeled_student = all_student[batch.unlabeled_mask]
+        unlabeled_teacher = all_teacher[batch.unlabeled_mask]
+
+        labeled_loss = lossFn(labeled_pred, batch.y)
+        consistency_loss = consistency_loss_fn(unlabeled_student, unlabeled_teacher)
+        total_loss = labeled_loss + lambda_U * consistency_loss
+        total_loss.backward()
+
+        grad_norm_before = torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=float('inf'))
+        torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
+        grad_norm_after = sum(p.grad.norm().item()**2 for p in student_model.parameters() if p.grad is not None)**0.5
+
+        opt.step()
+        update_ema_variables(student_model, teacher_model, alpha, global_step + batch_idx)
+
+        _pred = labeled_pred.reshape(-1, n_labeled)
+        _truth = batch.y.reshape(-1, n_labeled)
+
+        total_labeled_loss += labeled_loss.item()
+        total_consistency_loss += consistency_loss.item()
+        pred.append(_pred.cpu().detach().numpy())
+        truth.append(_truth.cpu().detach().numpy())
+        total_batches += 1
+
+        debug_stats['labeled_loss'].append(labeled_loss.item())
+        debug_stats['consistency_loss'].append(consistency_loss.item())
+        debug_stats['total_loss'].append(total_loss.item())
+        debug_stats['teacher_pred_mean'].append(unlabeled_teacher.mean().item())
+        debug_stats['teacher_pred_std'].append(unlabeled_teacher.std().item())
+        debug_stats['student_pred_mean'].append(unlabeled_student.mean().item())
+        debug_stats['student_pred_std'].append(unlabeled_student.std().item())
+        debug_stats['student_logits_mean'].append(labeled_pred.mean().item())
+        debug_stats['student_logits_std'].append(labeled_pred.std().item())
+        debug_stats['pred_diff_mean'].append((unlabeled_student - unlabeled_teacher).abs().mean().item())
+        debug_stats['pred_diff_max'].append((unlabeled_student - unlabeled_teacher).abs().max().item())
+        debug_stats['grad_norm_before_clip'].append(grad_norm_before.item() if torch.is_tensor(grad_norm_before) else grad_norm_before)
+        debug_stats['grad_norm_after_clip'].append(grad_norm_after)
+
+    scheduler.step()
+
+    avg_labeled_loss = total_labeled_loss / total_batches
+    avg_consistency_loss = total_consistency_loss / total_batches
+
+    epoch_debug = {}
+    for key, values in debug_stats.items():
+        epoch_debug[f'debug/{key}_mean'] = np.mean(values)
+        epoch_debug[f'debug/{key}_max'] = np.max(values)
+
+    truth = np.concatenate(truth)
+    pred = np.concatenate(pred)
+    rmse = RMSE(truth, pred)
+
+    return avg_labeled_loss + lambda_U * avg_consistency_loss, rmse, truth, pred, epoch_debug
+
+
+def test_meanteacher_unified(loader, model, lossFn, device, n_labeled):
+    """统一图版本的 Mean Teacher 测试函数"""
+    model.eval()
+    total_labeled_loss = 0
+    pred, truth = [], []
+
+    if len(loader) == 0:
+        raise ValueError("Data loader is empty.")
+
+    with torch.no_grad():
+        for batch in loader:
+            if batch.x is None or batch.y is None:
+                continue
+            batch = batch.to(device)
+            all_logits = model(batch.x, batch.edge_index, batch.edge_attr)
+            labeled_logits = all_logits[batch.labeled_mask].reshape(-1, n_labeled)
+            batch_y = batch.y.reshape(-1, n_labeled)
+
+            loss = lossFn(labeled_logits, batch_y)
+            total_labeled_loss += loss.item()
+            pred.append(labeled_logits.cpu().numpy())
+            truth.append(batch_y.cpu().numpy())
+
+    avg_labeled_loss = total_labeled_loss / len(loader)
+    truth = np.concatenate(truth)
+    pred = np.concatenate(pred)
+    rmse = RMSE(truth, pred)
+    return avg_labeled_loss, rmse, truth, pred
+
+
 def test_meanteacher(loader, model, lossFn, device, nNodes):
     """Mean Teacher test function (uses teacher model)"""
     model.eval()

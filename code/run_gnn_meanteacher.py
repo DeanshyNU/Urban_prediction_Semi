@@ -11,9 +11,11 @@ from datetime import datetime
 import wandb
 
 # 导入自定义模块
-from datalib import preprocess_unlabeled_data, dataGen, dataGen_unlabeled, TransformFixMatch
+from datalib import preprocess_unlabeled_data, dataGen_unified, TransformFixMatch
+# from datalib import dataGen, dataGen_unlabeled  # 独立图（已注释，保留备用）
 from models import GNN
-from trainers import train_meanteacher, test_meanteacher, loadCheckPoint
+from trainers import train_meanteacher_unified, test_meanteacher_unified, loadCheckPoint
+# from trainers import train_meanteacher, test_meanteacher  # 独立图（已注释，保留备用）
 from utils import plotHist
 
 # 设备配置
@@ -28,8 +30,8 @@ def main():
     current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     job_id = os.environ.get('SLURM_JOB_ID', 'local')
 
-    # 读取卷积类型（默认 sage，可通过环境变量 CONV_TYPE=graphconv 切换）
-    conv_type = os.environ.get('CONV_TYPE', 'sage')
+    # 读取卷积类型（默认 graphconv，可通过环境变量 CONV_TYPE=sage 切换）
+    conv_type = os.environ.get('CONV_TYPE', 'graphconv')
 
     # 创建输出目录：方法名_时间_jobid（相对项目根目录 Fixmatch_GNN/log/）
     method_name = f'meanteacher_{conv_type}'
@@ -50,32 +52,37 @@ def main():
         nTimesteps=6624
     )
 
-    ##----------------------创建数据集----------------------
+    ##----------------------数据参数----------------------
     dataParam = {
         'geoMethod': 'average',
         'nCompPCA': 40,
         'window': 2,
         'poolSize': 12,
         'batchSize': 128,
-        'thres': 0.1,  # 与FixMatch一致，使用0.1
+        'thres': 0.1,
         'geoFeatures': 'full',
     }
-    print("步骤1: 生成有标签和无标签数据集")
-    trainLoader, validLoader, metadata, _ = dataGen(dataParam, DATA_PATH)
-
-    print("\n" + "="*60)
 
     ##----------------------数据增强----------------------
-    print("步骤2: 对无标签数据应用数据增强（Mean Teacher）")
-    # Mean Teacher只需要一次增强（弱增强）
-    # 增强强度：weak_m=1.5（温和）
+    print("步骤1: 对无标签数据应用数据增强（Mean Teacher）")
     augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42)
     augmented_data, _ = augmenter(unlabeled_data)
 
-    unlabeled_loader, _, _, _, _ = dataGen_unlabeled(dataParam, augmented_data, labeled=False, path=DATA_PATH, labeled_metadata=metadata)
-    print(f"增强后无标签样本数量: {len(unlabeled_loader.dataset)}")
-    print(f"有标签训练样本数量: {len(trainLoader.dataset)}")
-    print(f"有标签验证样本数量: {len(validLoader.dataset)}")
+    ##----------------------构建统一图数据集----------------------
+    print("步骤2: 构建统一图数据集（labeled + unlabeled，268节点）")
+    trainLoader, validLoader, metadata, _ = dataGen_unified(dataParam, DATA_PATH, augmented_data)
+
+    # --- 独立图（已注释，保留备用）---
+    # trainLoader, validLoader, metadata, _ = dataGen(dataParam, DATA_PATH)
+    # unlabeled_loader, _, _, _, _ = dataGen_unlabeled(dataParam, augmented_data, labeled=False,
+    #                                                   path=DATA_PATH, labeled_metadata=metadata)
+    # ---
+
+    print(f"统一图训练样本数量: {len(trainLoader.dataset)}")
+    print(f"统一图验证样本数量: {len(validLoader.dataset)}")
+    print(f"有标签节点: {metadata['n_labeled']}, 无标签节点: {metadata['n_unlabeled']}")
+
+    print("\n" + "="*60)
 
     ##----------------------生成模型----------------------
     nEpoch = 5000
@@ -177,16 +184,26 @@ def main():
     global_step = 0
     for epoch in range(EPOCH, nEpoch):
         ramp = rampup_factor(epoch, 100)
-        # Mean Teacher训练
-        trainLoss, trainRMSE, _, _, epoch_debug = train_meanteacher(
-            trainLoader, unlabeled_loader, student_model, teacher_model, lossFn, consistency_loss_fn,
-            opt, scheduler, device, metadata['nNodes'], lambda_U=3.0 * ramp, alpha=0.999,
+        # Mean Teacher训练（统一图）
+        trainLoss, trainRMSE, _, _, epoch_debug = train_meanteacher_unified(
+            trainLoader, student_model, teacher_model, lossFn, consistency_loss_fn,
+            opt, scheduler, device, metadata['n_labeled'], lambda_U=3.0 * ramp, alpha=0.999,
             global_step=global_step
         )
-        # 使用教师模型进行验证
-        validLoss, validRMSE, _, _ = test_meanteacher(
-            validLoader, teacher_model, lossFn, device, metadata['nNodes']
+        # 使用教师模型进行验证（统一图）
+        validLoss, validRMSE, _, _ = test_meanteacher_unified(
+            validLoader, teacher_model, lossFn, device, metadata['n_labeled']
         )
+        # --- 独立图（已注释，保留备用）---
+        # trainLoss, trainRMSE, _, _, epoch_debug = train_meanteacher(
+        #     trainLoader, unlabeled_loader, student_model, teacher_model, lossFn, consistency_loss_fn,
+        #     opt, scheduler, device, metadata['nNodes'], lambda_U=3.0 * ramp, alpha=0.999,
+        #     global_step=global_step
+        # )
+        # validLoss, validRMSE, _, _ = test_meanteacher(
+        #     validLoader, teacher_model, lossFn, device, metadata['nNodes']
+        # )
+        # ---
 
         global_step += len(trainLoader)
 
