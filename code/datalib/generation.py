@@ -384,6 +384,16 @@ def dataGen_unified(dataParam, path, unlabeled_data, nTrn=0.75, seed=19, predMod
     )
     n_labeled = len(labeled_indices)
     total_nodes = n_labeled + n_unlabeled
+
+    # 图结构统计
+    n_ll = int(np.sum(unified_adj[:n_labeled, :n_labeled] > 0) // 2)
+    n_uu = int(np.sum(unified_adj[n_labeled:, n_labeled:] > 0) // 2)
+    n_lu = int(np.sum(unified_adj[:n_labeled, n_labeled:] > 0))
+    degrees = np.sum(unified_adj > 0, axis=1)
+    print(f"[统一图] 节点: {total_nodes} (labeled={n_labeled}, unlabeled={n_unlabeled})")
+    print(f"[统一图] 边数: 总={n_ll+n_uu+n_lu} | labeled内部={n_ll} | unlabeled内部={n_uu} | 跨图={n_lu}")
+    print(f"[统一图] 节点度数: min={degrees.min()} max={degrees.max()} mean={degrees.mean():.1f} | 孤立节点={np.sum(degrees==0)}")
+
     edgeIdxV, edgeAttrV = pyg_utils.dense_to_sparse(torch.FloatTensor(unified_adj))
 
     # 3. 有标签节点特征
@@ -596,6 +606,10 @@ def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200, seed=4
         unified_dist_w = np.ones_like(unified_dist_w)
     unified_adj = np.abs(unified_similarity * unified_dist_w)
     unified_adj[unified_adj < dataParam['thres']] = 0.0
+    # 跨图边（labeled-unlabeled）单独用更严格的阈值过滤（纯距离边，噪声较多）
+    cross_thres = dataParam.get('cross_thres', 0.5)
+    unified_adj[:n_labeled, n_labeled:][unified_adj[:n_labeled, n_labeled:] < cross_thres] = 0.0
+    unified_adj[n_labeled:, :n_labeled][unified_adj[n_labeled:, :n_labeled] < cross_thres] = 0.0
     np.fill_diagonal(unified_adj, 0.0)
 
     # 7. kNN保底稀疏化
