@@ -11,7 +11,7 @@ from copy import deepcopy
 
 def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=5e-5, predMode=False):
     """Load or initialize checkpoint"""
-    chkptPath = f'./{modelName}.pt'
+    chkptPath = f'{modelName}.pt'
     if os.path.exists(chkptPath) and load:
         chkpt = torch.load(chkptPath, map_location=device)
         model.load_state_dict(chkpt['model_state_dict'])
@@ -19,12 +19,12 @@ def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=
         EPOCH = chkpt['epoch']
         bestLoss = chkpt['bestLoss']
         hist = chkpt['hist']
-        with open(f'./{modelName}_log', 'a') as f:
+        with open(f'{modelName}_log', 'a') as f:
             print("Checkpoint loaded.", file=f)
         if opt.param_groups[0]['lr'] < 1e-6 and resetLr:
             for param_group in opt.param_groups:
                 param_group['lr'] = lr
-            with open(f'./{modelName}_log', 'a') as f:
+            with open(f'{modelName}_log', 'a') as f:
                 print(f"Resetting LR from {opt.param_groups[0]['lr']} to {lr}", file=f)
     elif predMode:
         if not os.path.exists(chkptPath):
@@ -37,7 +37,7 @@ def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=
         EPOCH = 0
         bestLoss = np.inf
         hist = []
-        with open(f'./{modelName}_log', 'w') as f:
+        with open(f'{modelName}_log', 'w') as f:
             print("No checkpoint found, starting new model.", file=f)
     return EPOCH, bestLoss, chkptPath, hist
 

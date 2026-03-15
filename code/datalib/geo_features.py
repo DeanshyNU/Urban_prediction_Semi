@@ -2,6 +2,7 @@
 地理特征生成模块
 包含从文件或数据中生成地理特征的功能
 """
+import os
 import numpy as np
 import torch
 import mat73
@@ -13,7 +14,10 @@ def genGeoFeatures(path, geoMethod='average', poolSize=15, nCompPCA=40):
     从文件路径生成地理特征（用于有标签数据）
     """
     # --------------------------Geo features--------------------------
+    # assert os.path.isfile(f'{path}/FeaturePatch_401.mat'), f"未找到: {path}/FeaturePatch_401.mat"
+    # print(f"FeaturePatch_401.mat keys: {list(mat73.loadmat(f'{path}/FeaturePatch_401.mat').keys())}")
     _raw = mat73.loadmat(f'{path}/FeaturePatch_401.mat')['FeatureMat_zeros']
+
     # Remove 5th dimension because all stations are land based
     _idx = np.arange(_raw.shape[2])
     _idx = np.delete(_idx, 4)

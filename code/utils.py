@@ -113,6 +113,6 @@ def plotHist(hist, modelName):
     _ax[1].semilogy(_validRMSE, label="Validation")
     _ax[1].set_title("Station-wised Mean RMSE")
     _ax[1].legend(loc='upper right')
-    plt.savefig(f'./{modelName}_hist.png', dpi=200)
+    plt.savefig(f'{modelName}_hist.png', dpi=200)
     plt.close()
 

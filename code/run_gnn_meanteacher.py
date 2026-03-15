@@ -31,9 +31,10 @@ def main():
     # 读取卷积类型（默认 sage，可通过环境变量 CONV_TYPE=graphconv 切换）
     conv_type = os.environ.get('CONV_TYPE', 'sage')
 
-    # 创建输出目录：方法名_时间_jobid
+    # 创建输出目录：方法名_时间_jobid（相对项目根目录 Fixmatch_GNN/log/）
     method_name = f'meanteacher_{conv_type}'
-    output_dir = f'/home/hhz6461/Urban_prediction_Semi/log/{method_name}_{current_time}_job{job_id}'
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    output_dir = os.path.join(project_root, 'log', f'{method_name}_{current_time}_job{job_id}')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -111,14 +112,14 @@ def main():
     EPOCH, bestLoss, chkptPath, hist = loadCheckPoint(model_path, student_model, opt, device, load=False)
 
     # 保存元数据
-    with open(f'./{model_path}_param.pkl', 'wb') as f:
+    with open(f'{model_path}_param.pkl', 'wb') as f:
         pickle.dump(modelParam, f)
         pickle.dump(dataParam, f)
         pickle.dump(metadata, f)
     if torch.cuda.is_available():
-        with open(f'./{model_path}_log', 'a') as f:
+        with open(f'{model_path}_log', 'a') as f:
             print(torch.cuda.get_device_name(torch.cuda.current_device()), file=f)
-    with open(f'./{model_path}_log', 'a') as f:
+    with open(f'{model_path}_log', 'a') as f:
         print("学生模型架构:", file=f)
         print(student_model, file=f)
 
@@ -146,7 +147,7 @@ def main():
     )
 
     # 记录配置
-    with open(f'./{model_path}_log', 'a') as f:
+    with open(f'{model_path}_log', 'a') as f:
         print("="*60, file=f)
         print("Mean Teacher配置:", file=f)
         print(f"  实验时间: {current_time}", file=f)
@@ -190,7 +191,7 @@ def main():
         global_step += len(trainLoader)
 
         # 记录结果 + 调试信息
-        with open(f'./{model_path}_log', 'a') as f:
+        with open(f'{model_path}_log', 'a') as f:
             print("", file=f)
             print(f"轮次 {epoch}: 损失 {trainLoss:1.4e}/{validLoss:1.4e}; "
                   f"RMSE {trainRMSE[0]:1.3f}/{validRMSE[0]:1.3f}; "
@@ -234,7 +235,7 @@ def main():
         # 保存最佳模型（保存教师模型）
         if validRMSE[0] < bestLoss:
             bestLoss = validRMSE[0]
-            with open(f'./{model_path}_log', 'a') as f:
+            with open(f'{model_path}_log', 'a') as f:
                 print("模型已保存。", file=f)
             torch.save({
                 'epoch': epoch,
