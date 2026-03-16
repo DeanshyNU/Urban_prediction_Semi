@@ -225,7 +225,6 @@ def dataGen_unlabeled(dataParam, data, nTrn=0.75, seed=19, predMode=False,
         for j in range(nNodes):
             Cov = np.corrcoef(SimilarityMat[i, :], SimilarityMat[j, :])
             r = Cov[0, 1] if not np.isnan(Cov[0, 1]) else 0.0
-            r = max(r, 0.0)
             Matrix[i, j] = r
     _simiW = Matrix
 
@@ -247,6 +246,13 @@ def dataGen_unlabeled(dataParam, data, nTrn=0.75, seed=19, predMode=False,
 
     cfd_features = np.transpose(WRFMat, (0, 2, 1))    # (T, nNodes, 54)
     clms_features = np.transpose(CLMSMat, (0, 2, 1))  # (T, nNodes, 3)
+
+    # 时间对齐：V2 无标签数据从 2018-05-01 00:00 开始，V1 有标签数据从 2018-05-02 02:00 开始
+    # 偏移 26 小时，只取有标签数据对应的时间段（2948 步）
+    TIME_OFFSET = 26
+    T_LABELED = 2948
+    cfd_features = cfd_features[TIME_OFFSET:TIME_OFFSET + T_LABELED]
+    clms_features = clms_features[TIME_OFFSET:TIME_OFFSET + T_LABELED]
 
     # 从 labeled_metadata 获取对齐维度
     if labeled_metadata is not None:
@@ -416,6 +422,12 @@ def dataGen_unified(dataParam, path, unlabeled_data, nTrn=0.75, seed=19, predMod
     cfd_unlabeled = np.transpose(WRFMat, (0, 2, 1))    # (T, n_unlabeled, 54)
     clms_unlabeled = np.transpose(CLMSMat, (0, 2, 1))  # (T, n_unlabeled, 3)
 
+    # 时间对齐：V2 无标签数据从 2018-05-01 00:00 开始，V1 有标签数据从 2018-05-02 02:00 开始
+    # 偏移 26 小时，只取有标签数据对应的时间段（2948 步）
+    TIME_OFFSET = 26
+    cfd_unlabeled = cfd_unlabeled[TIME_OFFSET:TIME_OFFSET + len(labeled_features)]
+    clms_unlabeled = clms_unlabeled[TIME_OFFSET:TIME_OFFSET + len(labeled_features)]
+
     T = len(labeled_features)
     assert len(cfd_unlabeled) == T
 
@@ -582,7 +594,6 @@ def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200, seed=4
             if i != j:
                 cov = np.corrcoef(unlabeled_similarity_mat[i, :], unlabeled_similarity_mat[j, :])
                 r = cov[0, 1] if not np.isnan(cov[0, 1]) else 0.0
-                r = max(r, 0.0)
                 unified_similarity[idx_i, idx_j] = r
             else:
                 unified_similarity[idx_i, idx_j] = 1.0

@@ -167,10 +167,12 @@ def main():
         print("  梯度裁剪: max_norm=1.0", file=f)
         print(f"  无标签损失权重: lambda_U=3.0（带ramp-up, ramp_ep=100）", file=f)
         print("  EMA系数: alpha=0.999", file=f)
-        print("  模型: GNN (SAGEConv)", file=f)
+        print(f"  模型: GNN ({conv_type})", file=f)
+        print(f"  图结构: 统一图（labeled={metadata['n_labeled']}节点 + unlabeled={metadata['n_unlabeled']}节点 = {metadata['total_nodes']}节点）", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
         print("  特征: 统一特征向量（动态+静态合并）", file=f)
-        print("  图稀疏化阈值: thres=0.1", file=f)
+        print(f"  图稀疏化阈值: thres={dataParam['thres']}, cross_thres={dataParam.get('cross_thres', 0.5)}", file=f)
+        print("  时间对齐: V2偏移26小时，只用V1对应时间段（2948步）", file=f)
         print("="*60, file=f)
 
     ##----------------------训练----------------------
