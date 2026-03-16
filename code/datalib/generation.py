@@ -209,16 +209,21 @@ def dataGen_unlabeled(dataParam, data, nTrn=0.75, seed=19, predMode=False,
         )
 
     # --------------------------图构建--------------------------
-    Map = data['Map']
+    # 用 NodeLocation（lat/lon）计算距离，Map 是网格坐标不用于距离计算
+    NodeLocation = data['NodeLocation']   # (nNodes, 2) lat/lon
     SimilarityMat = data['SimilarityMat']
-    nNodes = Map.shape[0]
+    nNodes = NodeLocation.shape[0]
+
+    print(f"  [debug] NodeLocation shape={NodeLocation.shape}, range=[{NodeLocation.min():.4f}, {NodeLocation.max():.4f}]")
 
     Distance = np.zeros((nNodes, nNodes))
     for i in range(nNodes):
         for j in range(nNodes):
             Distance[i, j] = np.sqrt(
-                (Map[i, 0] - Map[j, 0])**2 + (Map[i, 1] - Map[j, 1])**2
+                (NodeLocation[i, 0] - NodeLocation[j, 0])**2 +
+                (NodeLocation[i, 1] - NodeLocation[j, 1])**2
             )
+    print(f"  [debug] Distance range=[{Distance.min():.4f}, {Distance.max():.4f}], mean={Distance.mean():.4f}")
 
     Matrix = np.zeros((nNodes, nNodes))
     for i in range(nNodes):
@@ -545,8 +550,12 @@ def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200, seed=4
     n_labeled = labeled_locations.shape[0]
 
     # 2. 获取无标签站点的位置和相似性信息
-    unlabeled_locations = unlabeled_data['Map']
+    # 用 NodeLocation（lat/lon，范围~0-0.42），Map 是网格坐标（范围100s-10000s）不用于距离计算
+    unlabeled_locations = unlabeled_data['NodeLocation']
     unlabeled_similarity_mat = unlabeled_data['SimilarityMat']
+
+    print(f"  [debug] labeled_locations shape={labeled_locations.shape}, range=[{labeled_locations.min():.4f}, {labeled_locations.max():.4f}]")
+    print(f"  [debug] unlabeled_locations (NodeLocation) shape={unlabeled_locations.shape}, range=[{unlabeled_locations.min():.4f}, {unlabeled_locations.max():.4f}]")
 
     assert unlabeled_locations.shape[0] >= n_unlabeled
     if unlabeled_locations.shape[0] > n_unlabeled:
@@ -582,6 +591,12 @@ def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200, seed=4
             )
             unified_distance[i, idx_j] = dist
             unified_distance[idx_j, i] = dist
+    print(f"  [debug] unified_distance range=[{unified_distance.min():.4f}, {unified_distance.max():.4f}], mean={unified_distance[unified_distance>0].mean():.4f}")
+    print(f"  [debug] labeled_dist (L-L) range=[{labeled_dist.min():.4f}, {labeled_dist.max():.4f}]")
+    uu_dist = unified_distance[n_labeled:, n_labeled:]
+    lu_dist = unified_distance[:n_labeled, n_labeled:]
+    print(f"  [debug] U-U dist range=[{uu_dist[uu_dist>0].min():.4f}, {uu_dist.max():.4f}], mean={uu_dist[uu_dist>0].mean():.4f}")
+    print(f"  [debug] L-U dist range=[{lu_dist.min():.4f}, {lu_dist.max():.4f}], mean={lu_dist.mean():.4f}")
 
     # 5. 计算统一的相似性矩阵
     unified_similarity = np.zeros((total_nodes, total_nodes))
@@ -615,13 +630,19 @@ def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200, seed=4
         unified_dist_w = (unified_dist_w - _off) / _scl
     else:
         unified_dist_w = np.ones_like(unified_dist_w)
+    print(f"  [debug] unified_dist_w range=[{unified_dist_w.min():.4f}, {unified_dist_w.max():.4f}]")
+    print(f"  [debug] unified_similarity range=[{unified_similarity.min():.4f}, {unified_similarity.max():.4f}]")
     unified_adj = np.abs(unified_similarity * unified_dist_w)
+    print(f"  [debug] unified_adj before threshold: nonzero={np.sum(unified_adj>0)}, max={unified_adj.max():.4f}, "
+          f"UU_nonzero={np.sum(unified_adj[n_labeled:,n_labeled:]>0)}, LU_nonzero={np.sum(unified_adj[:n_labeled,n_labeled:]>0)}")
     unified_adj[unified_adj < dataParam['thres']] = 0.0
     # 跨图边（labeled-unlabeled）单独用更严格的阈值过滤（纯距离边，噪声较多）
     cross_thres = dataParam.get('cross_thres', 0.5)
     unified_adj[:n_labeled, n_labeled:][unified_adj[:n_labeled, n_labeled:] < cross_thres] = 0.0
     unified_adj[n_labeled:, :n_labeled][unified_adj[n_labeled:, :n_labeled] < cross_thres] = 0.0
     np.fill_diagonal(unified_adj, 0.0)
+    print(f"  [debug] unified_adj after threshold (thres={dataParam['thres']}, cross_thres={cross_thres}): "
+          f"UU_nonzero={np.sum(unified_adj[n_labeled:,n_labeled:]>0)}, LU_nonzero={np.sum(unified_adj[:n_labeled,n_labeled:]>0)}")
 
     # 7. kNN保底稀疏化
     unified_adj = apply_knn_sparsify(unified_adj, k=8)
