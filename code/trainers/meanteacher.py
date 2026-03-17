@@ -254,6 +254,51 @@ def train_meanteacher_unified(loader, student_model, teacher_model, lossFn, cons
     return avg_labeled_loss + lambda_U * avg_consistency_loss, rmse, truth, pred, epoch_debug
 
 
+def test_meanteacher_unified_ablation(loader, model, lossFn, device, n_labeled):
+    """
+    消融测试：对比完整统一图 vs 仅labeled子图的RMSE
+    用于诊断unlabeled节点是否对labeled预测有帮助
+    """
+    model.eval()
+    rmse_full_list, rmse_labeled_only_list = [], []
+
+    with torch.no_grad():
+        for batch in loader:
+            if batch.x is None or batch.y is None:
+                continue
+            batch = batch.to(device)
+            batch_y = batch.y.reshape(-1, n_labeled)
+
+            # --- 完整统一图（含unlabeled节点）---
+            all_logits = model(batch.x, batch.edge_index, batch.edge_attr)
+            labeled_logits_full = all_logits[batch.labeled_mask].reshape(-1, n_labeled)
+
+            # --- 仅labeled子图（去掉unlabeled节点）---
+            # 只保留labeled节点的特征和边
+            labeled_mask = batch.labeled_mask
+            labeled_x = batch.x[labeled_mask]
+            # 过滤只含labeled节点的边
+            src, dst = batch.edge_index
+            edge_mask = labeled_mask[src] & labeled_mask[dst]
+            labeled_edge_index_raw = batch.edge_index[:, edge_mask]
+            labeled_edge_attr = batch.edge_attr[edge_mask] if batch.edge_attr is not None else None
+            # 重新映射节点编号（0~n_labeled-1）
+            node_map = torch.full((batch.x.shape[0],), -1, dtype=torch.long, device=batch.x.device)
+            node_map[labeled_mask] = torch.arange(n_labeled, device=batch.x.device)
+            labeled_edge_index = node_map[labeled_edge_index_raw]
+            logits_labeled_only = model(labeled_x, labeled_edge_index, labeled_edge_attr)
+            logits_labeled_only = logits_labeled_only.reshape(-1, n_labeled)
+
+            rmse_full_list.append(RMSE(batch_y.cpu().numpy(), labeled_logits_full.cpu().numpy())[0])
+            rmse_labeled_only_list.append(RMSE(batch_y.cpu().numpy(), logits_labeled_only.cpu().numpy())[0])
+
+    mean_full = np.mean(rmse_full_list)
+    mean_labeled_only = np.mean(rmse_labeled_only_list)
+    print(f"[消融] 完整统一图 RMSE={mean_full:.4f} | 仅labeled子图 RMSE={mean_labeled_only:.4f} | "
+          f"差值={mean_full - mean_labeled_only:+.4f} ({'统一图更差' if mean_full > mean_labeled_only else '统一图更好'})")
+    return mean_full, mean_labeled_only
+
+
 def test_meanteacher_unified(loader, model, lossFn, device, n_labeled):
     """统一图版本的 Mean Teacher 测试函数"""
     model.eval()

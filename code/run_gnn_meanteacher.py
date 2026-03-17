@@ -14,7 +14,7 @@ import wandb
 from datalib import preprocess_unlabeled_data, dataGen_unified, TransformFixMatch
 # from datalib import dataGen, dataGen_unlabeled  # 独立图（已注释，保留备用）
 from models import GNN
-from trainers import train_meanteacher_unified, test_meanteacher_unified, loadCheckPoint
+from trainers import train_meanteacher_unified, test_meanteacher_unified, loadCheckPoint, test_meanteacher_unified_ablation
 # from trainers import train_meanteacher, test_meanteacher  # 独立图（已注释，保留备用）
 from utils import plotHist
 
@@ -70,7 +70,8 @@ def main():
 
     ##----------------------构建统一图数据集----------------------
     print("步骤2: 构建统一图数据集（labeled + unlabeled，268节点）")
-    trainLoader, validLoader, metadata, _ = dataGen_unified(dataParam, DATA_PATH, augmented_data)
+    trainLoader, validLoader, metadata, _ = dataGen_unified(dataParam, DATA_PATH, augmented_data,
+                                                             output_dir=output_dir)
 
     # --- 独立图（已注释，保留备用）---
     # trainLoader, validLoader, metadata, _ = dataGen(dataParam, DATA_PATH)
@@ -265,6 +266,10 @@ def main():
                 'hist': hist,
             }, chkptPath)
             wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
+
+        # 每100个epoch做一次消融测试：统一图 vs 仅labeled子图
+        if epoch % 100 == 0:
+            test_meanteacher_unified_ablation(validLoader, teacher_model, lossFn, device, metadata['n_labeled'])
 
         # 绘制训练历史
         hist.append([trainLoss, validLoss, trainRMSE[0], validRMSE[0]])

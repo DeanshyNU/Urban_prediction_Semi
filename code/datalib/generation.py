@@ -363,7 +363,8 @@ def dataGen_unlabeled(dataParam, data, nTrn=0.75, seed=19, predMode=False,
 # labeled 在前（0:n_labeled），unlabeled 在后（n_labeled:total_nodes）
 # ============================================================
 
-def dataGen_unified(dataParam, path, unlabeled_data, nTrn=0.75, seed=19, predMode=False):
+def dataGen_unified(dataParam, path, unlabeled_data, nTrn=0.75, seed=19, predMode=False,
+                    output_dir=None):
     """
     统一图结构：将68个有标签节点和200个无标签节点合并为268节点的大图
     每个时间步生成一个 Data 对象，包含 labeled_mask 和 unlabeled_mask
@@ -373,6 +374,7 @@ def dataGen_unified(dataParam, path, unlabeled_data, nTrn=0.75, seed=19, predMod
         path: 有标签数据路径
         unlabeled_data: 预处理（+增强）后的无标签数据字典
         nTrn: 训练集比例
+        output_dir: 可选，若提供则将图结构可视化保存到该目录
         seed: 随机种子
         predMode: 预测模式
     """
@@ -404,6 +406,15 @@ def dataGen_unified(dataParam, path, unlabeled_data, nTrn=0.75, seed=19, predMod
     print(f"[统一图] 节点: {total_nodes} (labeled={n_labeled}, unlabeled={n_unlabeled})")
     print(f"[统一图] 边数: 总={n_ll+n_uu+n_lu} | labeled内部={n_ll} | unlabeled内部={n_uu} | 跨图={n_lu}")
     print(f"[统一图] 节点度数: min={degrees.min()} max={degrees.max()} mean={degrees.mean():.1f} | 孤立节点={np.sum(degrees==0)}")
+
+    # 可视化图结构（若提供 output_dir）
+    if output_dir is not None:
+        try:
+            from visualize_graph import visualize_unified_graph
+            save_path = os.path.join(output_dir, 'unified_graph.png')
+            visualize_unified_graph(unified_adj, unified_locations, n_labeled, save_path)
+        except Exception as e:
+            print(f"  [警告] 图结构可视化失败: {e}")
 
     edgeIdxV, edgeAttrV = pyg_utils.dense_to_sparse(torch.FloatTensor(unified_adj))
 
@@ -612,15 +623,35 @@ def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200, seed=4
                 unified_similarity[idx_i, idx_j] = r
             else:
                 unified_similarity[idx_i, idx_j] = 1.0
-    max_dist = np.max(unified_distance)
+    # 5b. 计算 L-U 跨图相似性（时序相关性）
+    # 与 L-L / U-U 保持一致：使用 abs(corrcoef) 而非纯距离公式
+    # labeled 时序代理：从 StationMat 取目标变量（PM2.5，第0列），shape (n_labeled, T_labeled)
+    _sm = mat73.loadmat(f'{path}/GNN_N1_StationMat.mat')['StationMat_se_fill']
+    _sm = np.transpose(_sm, (0, 2, 1))          # (T_labeled, n_labeled, nFeats)
+    labeled_ts = _sm[:, :, 0].T                 # (n_labeled, T_labeled) — PM2.5 实测时序
+
+    # unlabeled 时序代理：SimilarityMat，shape (n_unlabeled, T_full=6624)
+    # 用与 labeled 对齐的时间段（偏移26小时，取2948步）
+    TIME_OFFSET = 26
+    T_LABELED = labeled_ts.shape[1]
+    unlabeled_ts = unlabeled_similarity_mat[:, TIME_OFFSET:TIME_OFFSET + T_LABELED]  # (n_unlabeled, T_labeled)
+
+    # 向量化计算 L-U 相关矩阵：corrcoef([labeled_ts; unlabeled_ts]) 取左上右下块
+    combined_ts = np.vstack([labeled_ts, unlabeled_ts])   # (n_labeled+n_unlabeled, T_labeled)
+    corr_full = np.corrcoef(combined_ts)                  # (n_labeled+n_unlabeled, n_labeled+n_unlabeled)
+    lu_corr = corr_full[:n_labeled, n_labeled:]           # (n_labeled, n_unlabeled)
+    lu_corr = np.nan_to_num(lu_corr, nan=0.0)             # NaN → 0
+
     for i in range(n_labeled):
         for j in range(n_unlabeled):
             idx_j = n_labeled + j
-            dist = unified_distance[i, idx_j]
-            normalized_dist = dist / max_dist
-            similarity = np.exp(-normalized_dist * 2.0)
-            unified_similarity[i, idx_j] = similarity
-            unified_similarity[idx_j, i] = similarity
+            r = lu_corr[i, j]
+            # 与 L-L / U-U 公式一致：保留正负相关（abs 在最终 unified_adj 中统一取）
+            unified_similarity[i, idx_j] = r
+            unified_similarity[idx_j, i] = r
+
+    print(f"  [debug] L-U corr range=[{lu_corr.min():.4f}, {lu_corr.max():.4f}], "
+          f"mean_abs={np.abs(lu_corr).mean():.4f}")
 
     # 6. 构建邻接矩阵
     unified_dist_w = np.exp(-unified_distance)
@@ -636,8 +667,9 @@ def build_unified_graph(dataParam, path, unlabeled_data, n_unlabeled=200, seed=4
     print(f"  [debug] unified_adj before threshold: nonzero={np.sum(unified_adj>0)}, max={unified_adj.max():.4f}, "
           f"UU_nonzero={np.sum(unified_adj[n_labeled:,n_labeled:]>0)}, LU_nonzero={np.sum(unified_adj[:n_labeled,n_labeled:]>0)}")
     unified_adj[unified_adj < dataParam['thres']] = 0.0
-    # 跨图边（labeled-unlabeled）单独用更严格的阈值过滤（纯距离边，噪声较多）
-    cross_thres = dataParam.get('cross_thres', 0.5)
+    # L-U 跨图边现在基于真实时序相关性，与 L-L / U-U 使用相同阈值（thres）
+    # cross_thres 保留作为可选的额外过滤，默认与 thres 相同（不额外收紧）
+    cross_thres = dataParam.get('cross_thres', dataParam['thres'])
     unified_adj[:n_labeled, n_labeled:][unified_adj[:n_labeled, n_labeled:] < cross_thres] = 0.0
     unified_adj[n_labeled:, :n_labeled][unified_adj[n_labeled:, :n_labeled] < cross_thres] = 0.0
     np.fill_diagonal(unified_adj, 0.0)
