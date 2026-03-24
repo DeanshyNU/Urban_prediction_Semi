@@ -6,13 +6,14 @@ from datetime import datetime
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
-# 添加完整时间戳和SLURM作业ID到输出文件夹名称
+project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+conv_type = os.environ.get('CONV_TYPE', 'graphconv').lower()
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 job_id = os.environ.get('SLURM_JOB_ID', '')
 if job_id:
-    output_dir = f'./semi_supervised_{timestamp}_job{job_id}'
+    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}_{timestamp}_job{job_id}')
 else:
-    output_dir = f'./semi_supervised_{timestamp}'
+    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}_{timestamp}')
 os.makedirs(output_dir, exist_ok=True)
 
 def main():
@@ -23,7 +24,7 @@ def main():
             'window' : 2,
             'poolSize': 12,
             'batchSize': 128,  # 降低batch_size避免OOM
-            'thres':    0.4,  # 提高阈值以降低边密度（从87%降到约20-30%）
+            'thres':    0.1,
             'geoFeatures':  'full',
             }
     n_unlabeled = 200  # 无标签站点数
@@ -112,14 +113,16 @@ def main():
             'oDim':     metadata['oDim'],
             'BN':       False,
             'Dropout':  True,  # 启用dropout
+            'conv_type': conv_type,
     }
-    modelName = f'geoEmbed_{dataParam["geoMethod"]}_gconv_semi_{dataParam["geoFeatures"]}Geo_{n_unlabeled}unlabeled'
-    
+    modelName = f'geoEmbed_{dataParam["geoMethod"]}_{conv_type}_semi_{dataParam["geoFeatures"]}Geo_{n_unlabeled}unlabeled'
+    wandb_name = f'{modelName}_job{job_id}' if job_id else modelName
+
     # 初始化 W&B
     wandb.init(
         entity="urban_prediction",
         project="Semi-supervised GNN",
-        name=modelName,
+        name=wandb_name,
         config={
             **dataParam,
             **modelParam,
@@ -134,8 +137,12 @@ def main():
     )
     
     model = (network_semi.GNN(modelParam)).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt,gamma=0.9992)
+
+    # Early stopping
+    early_stop_patience = 300  # epochs without improvement
+    early_stop_counter = 0
     lossFn = torch.nn.HuberLoss().to(device)
     # Load checkpoint or initialize training
     EPOCH,bestLoss,chkptPath,hist = network_semi.loadCheckPoint(modelName,model,opt,device,load=False,output_dir=output_dir)
@@ -165,10 +172,12 @@ def main():
         print(f"  训练轮数: {nEpoch}", file=f)
         print(f"  学习率: 1e-3", file=f)
         print(f"  学习率衰减: 0.9992", file=f)
-        print(f"  优化器: Adam", file=f)
+        print(f"  优化器: Adam (weight_decay=1e-4)", file=f)
         print(f"  损失函数: HuberLoss", file=f)
         print(f"  地理嵌入: 无标签数据使用有标签归一化参数后 clip 到 [0,1]", file=f)
         print(f"  梯度裁剪: max_norm=1.0", file=f)
+        print(f"  Early stopping: patience={early_stop_patience} epochs", file=f)
+        print(f"  Weight decay: 1e-4", file=f)
         print("", file=f)
         print("数据集信息:", file=f)
         print(f"  总节点数: {metadata['nNodes']}", file=f)
@@ -178,6 +187,19 @@ def main():
         print(f"  验证样本数: {len(validLoader.dataset)}", file=f)
         print(f"  输入特征维度: {metadata['iDim']}", file=f)
         print(f"  输出维度: {metadata['oDim']}", file=f)
+        print("", file=f)
+        print("图结构（分块计算）:", file=f)
+        Adj = metadata['AdjMatrix']
+        nL = metadata['nNodes_labeled']
+        n_ll = int(np.sum(Adj[:nL, :nL] > 0) // 2)
+        n_uu = int(np.sum(Adj[nL:, nL:] > 0) // 2)
+        n_lu = int(np.sum(Adj[:nL, nL:] > 0))
+        print(f"  L-L edges: {n_ll} (thres={dataParam.get('thres_ll', dataParam['thres'])})", file=f)
+        print(f"  U-U edges: {n_uu} (thres={dataParam.get('thres_uu', dataParam['thres'])})", file=f)
+        print(f"  L-U edges: {n_lu} (thres={dataParam.get('thres_lu', dataParam['thres'])})", file=f)
+        print(f"  Total edges: {n_ll + n_uu + n_lu}", file=f)
+        degrees = np.sum(Adj > 0, axis=1)
+        print(f"  Degree: min={degrees.min()} max={degrees.max()} mean={degrees.mean():.1f}", file=f)
         print("="*60, file=f)
 
     for epoch in range(EPOCH,nEpoch):
@@ -213,6 +235,7 @@ def main():
         # Save best model
         if validRMSE[0]<bestLoss:
             bestLoss = validRMSE[0]
+            early_stop_counter = 0  # reset counter
             with open(f'{output_dir}/{modelName}_log','a') as f: print("Model saved.",file=f)
             wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
             torch.save({
@@ -220,8 +243,15 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'opt_state_dict':   opt.state_dict(),
                 'bestLoss':         bestLoss,
-                'hist':             hist,  # 修复：添加hist字段
+                'hist':             hist,
                 }, chkptPath)
+        else:
+            early_stop_counter += 1
+            if early_stop_counter >= early_stop_patience:
+                with open(f'{output_dir}/{modelName}_log','a') as f:
+                    print(f"\nEarly stopping at epoch {epoch}: no improvement for {early_stop_patience} epochs. Best valid RMSE: {bestLoss:.6f}", file=f)
+                print(f"Early stopping at epoch {epoch}. Best valid RMSE: {bestLoss:.6f}")
+                break
         # Plot training history
         hist.append([trainLoss,validLoss,trainRMSE[0],validRMSE[0]])
         utils.plotHist(hist,modelName,output_dir=output_dir)

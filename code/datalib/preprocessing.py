@@ -130,13 +130,14 @@ def preprocess_unlabeled_data(unlabeled_file, target_station_count=500, nTimeste
     print(f"正在加载数据: {unlabeled_file}")
     unlabeled_data = mat73.loadmat(unlabeled_file)
     
-    # 2. 合并风速分量
-    print("正在合并风速分量...")
-    unlabeled_data = merge_wind_components(unlabeled_data)
-
-    # 2.5 重排WRF变量顺序，对齐到有标签数据
-    print("正在重排WRF变量顺序（对齐到有标签数据）...")
-    unlabeled_data = reorder_wrf_to_labeled_order(unlabeled_data)
+    # 2. V2: keep all 63 WRF channels (no wind merge, no reorder)
+    # Wind components (X/Y) kept separate to match V2 labeled data format
+    print("V2模式: 保留全部63个WRF通道（不合并风速分量）")
+    # # Old V1 processing (merge 63→54, reorder):
+    # print("正在合并风速分量...")
+    # unlabeled_data = merge_wind_components(unlabeled_data)
+    # print("正在重排WRF变量顺序（对齐到有标签数据）...")
+    # unlabeled_data = reorder_wrf_to_labeled_order(unlabeled_data)
     
     # 3. 统一数据类型为float64（提前转换，确保后续操作在统一类型上进行）
     print("正在统一数据类型...")

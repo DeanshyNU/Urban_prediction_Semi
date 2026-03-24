@@ -1,492 +1,375 @@
+"""
+Semi-supervised GNN data loading - V2 data format
+Labeled: Labeled_Finalized_new.mat (58 stations, 3672 timesteps)
+Unlabeled: Unlabeled_Finalized.mat (2000 stations, sliced to 3672)
+Unified graph: 58 labeled + 200 unlabeled = 258 nodes
+"""
 import numpy as np
-import torch,pickle,os,mat73,utils
+import torch, pickle, os, mat73, utils
+import scipy.io as sio
 from torch_geometric import utils as pyg_utils
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from sklearn.decomposition import PCA
+from data import genGeoFeatures_v2, build_adj_matrix
 
-def merge_wind_components(data):
-    """
-    合并X和Y方向的风速为单一的风速大小特征
-    """
-    WRFMat = data['WRFMat'].copy()  # 复制以免修改原始数据
-    
-    # 第6个变量是X方向风速(索引45-53)，第7个变量是Y方向风速(索引54-62)
-    # 每个变量有9个网格点
-    wind_x = WRFMat[:, 45:54, :]  # X方向风速
-    wind_y = WRFMat[:, 54:63, :]  # Y方向风速
-    
-    # 计算风速大小(矢量模)
-    wind_magnitude = np.sqrt(wind_x**2 + wind_y**2)
-    
-    # 用风速大小替换X方向风速
-    WRFMat[:, 45:54, :] = wind_magnitude
-    
-    # 创建新的WRFMat，只保留前54个特征(删除Y方向风速)
-    new_WRFMat = WRFMat[:, :54, :]
-    
-    # 更新数据
-    data['WRFMat'] = new_WRFMat
-    return data
 
-def genGeoFeatures(path,geoMethod='average',poolSize=15,nCompPCA=40):
-    # --------------------------Geo features--------------------------
-    _raw = mat73.loadmat(f'{path}/FeaturePatch_401.mat')['FeatureMat_zeros']
-    print(f"  有标签原始特征数: {_raw.shape[2]}")
-    
-    # Remove 5th dimension because all stations are land based
-    _idx = np.arange(_raw.shape[2])
-    _idx = np.delete(_idx,4)
-    _raw = _raw[:,:,_idx,:]
-    _imageSize,_,_nFeatures,_nStations = _raw.shape
-    print(f"  删除第5维后特征数: {_nFeatures}")
-    
-    if geoMethod == 'average':     
-        # Min-max normalization
-        _norm = np.transpose(_raw,(2,0,1,3)).reshape(_nFeatures,-1)
-        _min,_max = np.min(_norm,axis=1), np.max(_norm,axis=1)
-        _max[_max==0] = 1e-5
-        _off = _min
-        _scl = _max-_min
-        _scl[_scl == 0] = 1e-5  # 避免除以0产生NaN
-        _norm = np.transpose(_raw,(0,1,3,2))
-        _norm = (_norm-_off)/_scl
-        _geoFeatures = np.transpose(_norm,(2,3,0,1))
-        # Average pooling 
-        _geoFeatures = torch.FloatTensor(_geoFeatures)
-        _avgPool = torch.nn.AdaptiveAvgPool2d((poolSize,poolSize))
-        _geoFeatures = _avgPool(_geoFeatures).reshape(_nStations,-1)
-
-    if geoMethod == 'pca':       
-        # Mean-std normalization  
-        _norm = np.transpose(_raw,(2,0,1,3)).reshape(_nFeatures,-1)
-        _off,_scl = np.mean(_norm,axis=1), np.std(_norm,axis=1)
-        _scl[_scl == 0] = 1e-5  # 避免除以0产生NaN
-        _norm = np.transpose(_raw,(0,1,3,2))
-        _norm = (_norm-_off)/_scl
-        _geoFeatures = np.transpose(_norm,(2,3,0,1))
-        # PCA
-        _geo2D = _geoFeatures.reshape(_nStations,-1)
-        _pca = PCA(n_components=nCompPCA)
-        _geoFeatures = _pca.fit_transform(_geo2D)
-        _geo_min, _geo_max = _geoFeatures.min(), _geoFeatures.max()
-        _geo_range = _geo_max - _geo_min
-        if _geo_range == 0:
-            _geoFeatures = np.zeros_like(_geoFeatures)  # 如果所有值相同，设为0
-        else:
-            _geoFeatures = (_geoFeatures - _geo_min) / _geo_range
-        _geoFeatures = torch.FloatTensor(_geoFeatures)
-    
-    return _geoFeatures,_off,_scl,_nStations
-
-def genGeoFeatures_unlabeled(unlabeled_data, geoMethod='average', poolSize=15, nCompPCA=40, 
-                              norm_off=None, norm_scl=None):
-    """
-    为无标签数据生成地理特征
-    如果提供了 norm_off 和 norm_scl，则使用这些参数进行归一化（与有标签数据一致）
-    """
-    _raw = unlabeled_data['UrbanFeatureMat']  # (401, 401, 7, nStations)
-    print(f"  无标签原始特征数: {_raw.shape[2]}")
-    
-    # 无标签数据不需要删除第5维，保持原始7个特征
+def genGeoFeatures_unlabeled(UrbanFeatureMat, geoMethod='average', poolSize=15,
+                              nCompPCA=40, norm_off=None, norm_scl=None):
+    """Generate geo features for unlabeled data, using labeled normalization params."""
+    _raw = UrbanFeatureMat
+    _raw = np.nan_to_num(_raw, nan=0.0)
     _imageSize, _, _nFeatures, _nStations = _raw.shape
-    print(f"  使用特征数: {_nFeatures}")
-    
-    # 归一化参数：如果提供了则使用，否则自己计算
-    use_provided_norm = (norm_off is not None and norm_scl is not None)
-    
+
+    use_provided = (norm_off is not None and norm_scl is not None)
+
     if geoMethod == 'average':
-        if use_provided_norm:
-            _off = norm_off
-            _scl = norm_scl
-            print(f"  ✓ 使用有标签数据的归一化参数")
+        if use_provided:
+            _off, _scl = norm_off, norm_scl
         else:
             _norm = np.transpose(_raw, (2, 0, 1, 3)).reshape(_nFeatures, -1)
             _min, _max = np.min(_norm, axis=1), np.max(_norm, axis=1)
             _max[_max == 0] = 1e-5
             _off = _min
             _scl = _max - _min
-            _scl[_scl == 0] = 1e-5  # 避免除以0产生NaN
-            print(f"  ⚠️  使用无标签数据自己的归一化参数")
-        
-        # 归一化前统计
-        _raw_flat = np.transpose(_raw, (2, 0, 1, 3)).reshape(_nFeatures, -1)
-        print(f"  归一化前统计: min=[{np.min(_raw_flat, axis=1)}], max=[{np.max(_raw_flat, axis=1)}]")
-        
+            _scl[_scl == 0] = 1e-5
+
         _norm = np.transpose(_raw, (0, 1, 3, 2))
         _norm = (_norm - _off) / _scl
-        # ✅ 添加clip，限制到[0,1]范围
         _norm = np.clip(_norm, 0.0, 1.0)
-        
-        # 归一化后统计
-        _norm_flat = np.transpose(_norm, (2, 3, 0, 1)).reshape(_nStations, -1)
-        print(f"  归一化后统计（clip后）: min={np.min(_norm_flat):.6f}, max={np.max(_norm_flat):.6f}, mean={np.mean(_norm_flat):.6f}")
-        
         _geoFeatures = np.transpose(_norm, (2, 3, 0, 1))
         _geoFeatures = torch.FloatTensor(_geoFeatures)
         _avgPool = torch.nn.AdaptiveAvgPool2d((poolSize, poolSize))
         _geoFeatures = _avgPool(_geoFeatures).reshape(_nStations, -1)
-    
+
     elif geoMethod == 'pca':
-        if use_provided_norm:
-            _off = norm_off
-            _scl = norm_scl
-            print(f"  ✓ 使用有标签数据的归一化参数")
+        if use_provided:
+            _off, _scl = norm_off, norm_scl
         else:
             _norm = np.transpose(_raw, (2, 0, 1, 3)).reshape(_nFeatures, -1)
             _off, _scl = np.mean(_norm, axis=1), np.std(_norm, axis=1)
-            _scl[_scl == 0] = 1e-5  # 避免除以0产生NaN
-            print(f"  ⚠️  使用无标签数据自己的归一化参数")
-        
+            _scl[_scl == 0] = 1e-5
+
         _norm = np.transpose(_raw, (0, 1, 3, 2))
         _norm = (_norm - _off) / _scl
         _geoFeatures = np.transpose(_norm, (2, 3, 0, 1))
         _geo2D = _geoFeatures.reshape(_nStations, -1)
         _pca = PCA(n_components=nCompPCA)
         _geoFeatures = _pca.fit_transform(_geo2D)
-        _geo_min, _geo_max = _geoFeatures.min(), _geoFeatures.max()
-        _geo_range = _geo_max - _geo_min
+        _geo_range = _geoFeatures.max() - _geoFeatures.min()
         if _geo_range == 0:
-            _geoFeatures = np.zeros_like(_geoFeatures)  # 如果所有值相同，设为0
+            _geoFeatures = np.zeros_like(_geoFeatures)
         else:
-            _geoFeatures = (_geoFeatures - _geo_min) / _geo_range
+            _geoFeatures = (_geoFeatures - _geoFeatures.min()) / _geo_range
         _geoFeatures = torch.FloatTensor(_geoFeatures)
-    
+
     return _geoFeatures, _off, _scl, _nStations
 
-def dataGen(dataParam,path,nTrn=0.75,predMode=False,n_unlabeled=200):
+
+def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     _window = dataParam['window']
     _batchSize = dataParam['batchSize']
-    
-    # --------------------------加载无标签数据--------------------------
-    print("正在加载无标签数据...")
-    unlabeled_data = mat73.loadmat(f'{path}/Unlabeled_Finalized.mat')
-    
-    # 首先获取有标签站点数量
-    _raw_labeled_temp = mat73.loadmat(f'{path}/GNN_N1_StationMat.mat')['StationMat_se_fill']
-    # 原始形状是 (timestep, nFeatures, nNodes)，所以节点数在shape[2]
-    _nNodes_labeled = _raw_labeled_temp.shape[2]  # 68
-    
-    # 数据源2的前68个站点对应有标签站点，从第68个开始选择n_unlabeled个无标签站点
-    start_idx = _nNodes_labeled
-    end_idx = start_idx + n_unlabeled
-    
-    # 检查并合并风速（如果WRFMat是63维，需要合并为54维）
-    if unlabeled_data['WRFMat'].shape[1] == 63:
-        print("检测到WRFMat为63维，正在合并风速分量...")
-        # 创建临时数据字典用于合并风速
-        temp_data = {'WRFMat': unlabeled_data['WRFMat'][:, :, start_idx:end_idx]}
-        temp_data = merge_wind_components(temp_data)
-        WRFMat_unlabeled = temp_data['WRFMat']  # (6624, 54, n_unlabeled)
+    T_2018 = 3672  # Only use 2018 data
+
+    # ======================== Load labeled data ========================
+    print("Loading Labeled_Finalized_new.mat...")
+    labeled = sio.loadmat(f'{path}/Labeled_Finalized_new.mat')
+
+    # Target
+    AoT = labeled['AoT_filled']  # (3672, 58)
+    if AoT.shape[1] > AoT.shape[0]:
+        AoT = AoT.T
+    targets_labeled = AoT  # (T, nNodes_labeled)
+
+    # WRF (63 dims, no merge)
+    WRFMat_l = labeled['WRFMat']
+    if WRFMat_l.shape[0] != T_2018:
+        WRFMat_l = np.transpose(WRFMat_l, (2, 1, 0))
+    cfd_labeled = np.transpose(WRFMat_l, (0, 2, 1))  # (T, nL, 63)
+
+    # CLMS (3 dims)
+    CLMSMat_l = labeled['CLMSMat']
+    if CLMSMat_l.shape[0] != T_2018:
+        CLMSMat_l = np.transpose(CLMSMat_l, (2, 1, 0))
+    clms_labeled = np.transpose(CLMSMat_l, (0, 2, 1))  # (T, nL, 3)
+
+    # UrbanFeature (17 dims)
+    # Cols 0-15: height/fraction (NaN → 0), Col 16: distance to lake (NaN → median)
+    UF_labeled = labeled.get('UrbanFeature', None)
+    if UF_labeled is not None:
+        n_nan = np.isnan(UF_labeled).sum()
+        if n_nan > 0:
+            UF_labeled[:, :16] = np.nan_to_num(UF_labeled[:, :16], nan=0.0)
+            col16 = UF_labeled[:, 16]
+            if np.any(np.isnan(col16)):
+                UF_labeled[np.isnan(col16), 16] = np.nanmedian(col16)
+            print(f"  [Debug] Labeled UrbanFeature NaN: {n_nan}, filled (0 for height/frac, median for distance)")
+        uf_min_l = UF_labeled.min(axis=0)
+        uf_range_l = UF_labeled.max(axis=0) - uf_min_l
+        uf_range_l[uf_range_l == 0] = 1e-5
+        UF_labeled_norm = (UF_labeled - uf_min_l) / uf_range_l
+
+    # GeoEmbed from UrbanFeatureMat
+    UFM_l = labeled.get('UrbanFeatureMat', None)
+    if UFM_l is not None:
+        _geoFeatures_labeled, _off, _scl, nL = genGeoFeatures_v2(
+            UFM_l, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'])
+        if torch.is_tensor(_geoFeatures_labeled):
+            _geoFeatures_labeled = _geoFeatures_labeled.numpy()
     else:
-        WRFMat_unlabeled = unlabeled_data['WRFMat'][:, :, start_idx:end_idx]  # (6624, 54, n_unlabeled)
-    CLMSMat_unlabeled = unlabeled_data['CLMSMat'][:, :, start_idx:end_idx]  # (6624, 3, n_unlabeled)
-    UrbanFeature_unlabeled = unlabeled_data['UrbanFeature'][start_idx:end_idx, :]  # (n_unlabeled, 17)
-    UrbanFeatureMat_unlabeled = unlabeled_data['UrbanFeatureMat'][:, :, :, start_idx:end_idx]  # (401, 401, 7, n_unlabeled)
-    
-    # 在使用前将UrbanFeatureMat中的NaN替换为0
-    UrbanFeatureMat_unlabeled = np.nan_to_num(UrbanFeatureMat_unlabeled, nan=0.0)
-    
-    # 归一化无标签数据的WRF和CLMS特征（与有标签数据范围一致）
-    print("\n正在归一化无标签数据的WRF和CLMS特征...")
-    print(f"  WRFMat归一化前: min={np.min(WRFMat_unlabeled):.6f}, max={np.max(WRFMat_unlabeled):.6f}, mean={np.mean(WRFMat_unlabeled):.6f}")
-    print(f"  CLMSMat归一化前: min={np.min(CLMSMat_unlabeled):.6f}, max={np.max(CLMSMat_unlabeled):.6f}, mean={np.mean(CLMSMat_unlabeled):.6f}")
-    WRFMat_unlabeled, _, _ = utils.MinMax(WRFMat_unlabeled)
-    CLMSMat_unlabeled, _, _ = utils.MinMax(CLMSMat_unlabeled)
-    print(f"  WRFMat归一化后: min={np.min(WRFMat_unlabeled):.6f}, max={np.max(WRFMat_unlabeled):.6f}, mean={np.mean(WRFMat_unlabeled):.6f}")
-    print(f"  CLMSMat归一化后: min={np.min(CLMSMat_unlabeled):.6f}, max={np.max(CLMSMat_unlabeled):.6f}, mean={np.mean(CLMSMat_unlabeled):.6f}")
-    
-    # 为无标签数据生成地理特征
-    # --------------------------加载有标签数据--------------------------
-    print("正在加载有标签数据...")
-    print(f"  使用参数: poolSize={dataParam['poolSize']}, geoMethod={dataParam['geoMethod']}")
-    _geoFeatures_labeled, _off, _scl, _nStations_labeled = genGeoFeatures(
-        path, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA']
-    )
-    
-    # 打印有标签数据归一化参数
-    print(f"\n有标签数据归一化参数:")
-    print(f"  _off: min={np.min(_off):.6f}, max={np.max(_off):.6f}, mean={np.mean(_off):.6f}")
-    print(f"  _scl: min={np.min(_scl):.6f}, max={np.max(_scl):.6f}, mean={np.mean(_scl):.6f}")
-    
-    # 无标签数据使用有标签数据的归一化参数（关键修复）
-    unlabeled_subset = {'UrbanFeatureMat': UrbanFeatureMat_unlabeled}
-    print(f"\n正在生成无标签数据地理特征...")
-    print(f"  使用参数: poolSize={dataParam['poolSize']}, geoMethod={dataParam['geoMethod']}")
-    _geoFeatures_unlabeled, _off_unlabeled, _scl_unlabeled, _ = genGeoFeatures_unlabeled(
-        unlabeled_subset, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'],
-        norm_off=_off, norm_scl=_scl  # 使用有标签数据的归一化参数
-    )
-    
-    # 验证归一化一致性
-    print(f"\n归一化一致性检查:")
-    print(f"  有标签 _off: shape={_off.shape}, mean={np.mean(_off):.6f}")
-    print(f"  无标签 _off: shape={_off_unlabeled.shape}, mean={np.mean(_off_unlabeled):.6f}")
-    print(f"  参数是否一致: {np.allclose(_off, _off_unlabeled)}")
-    
-    # 转换为numpy array以便后续处理
-    if torch.is_tensor(_geoFeatures_labeled):
-        _geoFeatures_labeled = _geoFeatures_labeled.numpy()
-    if torch.is_tensor(_geoFeatures_unlabeled):
-        _geoFeatures_unlabeled = _geoFeatures_unlabeled.numpy()
-    
-    print(f"地理嵌入特征维度:")
-    print(f"  有标签: {_geoFeatures_labeled.shape}")
-    print(f"  无标签: {_geoFeatures_unlabeled.shape}")
-    
-    # 验证维度是否一致
-    if _geoFeatures_labeled.shape[1] != _geoFeatures_unlabeled.shape[1]:
-        raise ValueError(
-            f"地理嵌入特征维度不一致！有标签: {_geoFeatures_labeled.shape[1]}维, "
-            f"无标签: {_geoFeatures_unlabeled.shape[1]}维"
-        )
-    
-    # --------------------------构建统一图--------------------------
-    print("正在构建统一图...")
-    
-    # 获取有标签站点数量
-    _raw_labeled = mat73.loadmat(f'{path}/GNN_N1_StationMat.mat')['StationMat_se_fill']
-    # 原始形状是 (timestep, nFeatures, nNodes)，所以节点数在shape[2]
-    _nNodes_labeled = _raw_labeled.shape[2]  # 68
-    
-    # 从数据源2中找到前68个站点作为有标签站点的对应位置
-    # 这68个站点对应数据源1的有标签站点
-    Map_labeled_from_unlabeled = unlabeled_data['Map'][:_nNodes_labeled, :]  # (68, 2)
-    SimilarityMat_labeled_from_unlabeled = unlabeled_data['SimilarityMat'][:_nNodes_labeled, :]  # (68, 10)
-    
-    # 从第68个站点开始选择n_unlabeled个无标签站点
-    Map_unlabeled_subset = unlabeled_data['Map'][_nNodes_labeled:_nNodes_labeled+n_unlabeled, :]  # (n_unlabeled, 2)
-    SimilarityMat_unlabeled_subset = unlabeled_data['SimilarityMat'][_nNodes_labeled:_nNodes_labeled+n_unlabeled, :]  # (n_unlabeled, 10)
-    
-    # 合并所有268个节点的Map和SimilarityMat
-    _nNodes_total = _nNodes_labeled + n_unlabeled
-    Map_all = np.vstack([Map_labeled_from_unlabeled, Map_unlabeled_subset])  # (268, 2)
-    SimilarityMat_all = np.vstack([SimilarityMat_labeled_from_unlabeled, SimilarityMat_unlabeled_subset])  # (268, 10)
-    
-    # 按照Yu et al (2024)的方法计算统一的邻接矩阵
-    print("正在计算距离矩阵...")
-    Distance = np.zeros((_nNodes_total, _nNodes_total))
-    for i in range(_nNodes_total):
-        for j in range(_nNodes_total):
-            Distance[i, j] = np.sqrt(
-                (Map_all[i, 0] - Map_all[j, 0])**2 + 
-                (Map_all[i, 1] - Map_all[j, 1])**2
-            )
-    
-    print("正在计算相似性矩阵...")
-    Similarity = np.zeros((_nNodes_total, _nNodes_total))
-    for i in range(_nNodes_total):
-        for j in range(_nNodes_total):
-            Cov = np.corrcoef(SimilarityMat_all[i, :], SimilarityMat_all[j, :])
-            r = Cov[0, 1] if not np.isnan(Cov[0, 1]) else 0.0
-            r = max(r, 0.0)  # 截断负值为0
-            Similarity[i, j] = r
-    
-    # 构建邻接矩阵：Adj = Similarity * exp(-Distance)
-    print("正在构建邻接矩阵...")
-    # 归一化Distance矩阵到0-1范围
-    max_dist = Distance.max()
-    Distance_normalized = Distance / max_dist
-    Adj = Similarity * np.exp(-Distance_normalized)
-    
-    # 阈值稀疏化
-    Adj[Adj < dataParam['thres']] = 0.0
-    np.fill_diagonal(Adj, 0.0)
-    
-    # 计算边密度和统计信息
-    n_edges_after = np.sum(Adj > 0)
-    edge_density = n_edges_after / (Adj.shape[0] * (Adj.shape[0] - 1)) * 100
-    print(f"图边密度: {edge_density:.2f}% ({n_edges_after}条边)")
-    
-    # 边权重统计
-    edge_weights = Adj[Adj > 0]
-    if len(edge_weights) > 0:
-        print(f"边权重统计: min={np.min(edge_weights):.6f}, max={np.max(edge_weights):.6f}, mean={np.mean(edge_weights):.6f}")
-    
-    # 检查有标签↔无标签之间的边
-    labeled_indices = np.arange(_nNodes_labeled)
-    unlabeled_indices = np.arange(_nNodes_labeled, _nNodes_total)
-    cross_edges = np.sum(Adj[np.ix_(labeled_indices, unlabeled_indices)] > 0)
-    print(f"有标签↔无标签边数: {cross_edges}")
-    
-    # 检查孤立节点
-    node_degrees = np.sum(Adj > 0, axis=1)
-    isolated_nodes = np.sum(node_degrees == 0)
-    if isolated_nodes > 0:
-        print(f"⚠️  警告: 发现{isolated_nodes}个孤立节点")
-    
-    # 确保对称性
+        nL = targets_labeled.shape[1]
+        _geoFeatures_labeled = np.zeros((nL, 1))
+        _off, _scl = np.array([0]), np.array([1])
+
+    nNodes_labeled = targets_labeled.shape[1]
+    nCFDFeats = cfd_labeled.shape[2]  # 63
+    print(f"  Labeled: {nNodes_labeled} stations, {T_2018} timesteps, WRF={nCFDFeats}d")
+
+    # ======================== Load unlabeled data ========================
+    print("Loading Unlabeled_Finalized.mat...")
+    unlabeled = mat73.loadmat(f'{path}/Unlabeled_Finalized.mat')
+
+    # Select unlabeled stations (skip first nNodes_labeled which are labeled)
+    # V2: first 58 usable stations are labeled, rest are unlabeled
+    usable_indices = labeled.get('usable_station_indices', None)
+    if usable_indices is not None:
+        # Unlabeled starts after all 106 V2 labeled stations
+        start_idx = 106
+    else:
+        start_idx = nNodes_labeled
+    end_idx = start_idx + n_unlabeled
+
+    # WRF unlabeled (63 dims, no merge)
+    WRFMat_u = unlabeled['WRFMat']
+    if WRFMat_u.shape[0] != 6624:
+        WRFMat_u = np.transpose(WRFMat_u, (2, 1, 0))
+    WRFMat_u = WRFMat_u[:T_2018, :, start_idx:end_idx]  # slice to 2018
+    cfd_unlabeled = np.transpose(WRFMat_u, (0, 2, 1))  # (T, nU, 63)
+
+    # CLMS unlabeled
+    CLMSMat_u = unlabeled['CLMSMat']
+    if CLMSMat_u.shape[0] != 6624:
+        CLMSMat_u = np.transpose(CLMSMat_u, (2, 1, 0))
+    CLMSMat_u = CLMSMat_u[:T_2018, :, start_idx:end_idx]
+    clms_unlabeled = np.transpose(CLMSMat_u, (0, 2, 1))  # (T, nU, 3)
+
+    # UrbanFeature unlabeled
+    # Cols 0-15: height/fraction (NaN → 0), Col 16: distance to lake (NaN → median)
+    UF_unlabeled = unlabeled.get('UrbanFeature', None)
+    if UF_unlabeled is not None:
+        UF_unlabeled = UF_unlabeled[start_idx:end_idx, :]
+        n_nan_u = np.isnan(UF_unlabeled).sum()
+        if n_nan_u > 0:
+            UF_unlabeled[:, :16] = np.nan_to_num(UF_unlabeled[:, :16], nan=0.0)
+            col16_u = UF_unlabeled[:, 16]
+            if np.any(np.isnan(col16_u)):
+                UF_unlabeled[np.isnan(col16_u), 16] = np.nanmedian(col16_u)
+            print(f"  [Debug] Unlabeled UrbanFeature NaN: {n_nan_u}, filled (0 for height/frac, median for distance)")
+        # Normalize using labeled params
+        if UF_labeled is not None:
+            UF_unlabeled_norm = (UF_unlabeled - uf_min_l) / uf_range_l
+            UF_unlabeled_norm = np.clip(UF_unlabeled_norm, 0.0, 1.0)
+        else:
+            UF_unlabeled_norm = UF_unlabeled
+    else:
+        UF_unlabeled_norm = None
+
+    # GeoEmbed unlabeled (use labeled norm params)
+    UFM_u = unlabeled.get('UrbanFeatureMat', None)
+    if UFM_u is not None:
+        UFM_u = np.nan_to_num(UFM_u[:, :, :, start_idx:end_idx], nan=0.0)
+        _geoFeatures_unlabeled, _, _, _ = genGeoFeatures_unlabeled(
+            UFM_u, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'],
+            norm_off=_off, norm_scl=_scl)
+        if torch.is_tensor(_geoFeatures_unlabeled):
+            _geoFeatures_unlabeled = _geoFeatures_unlabeled.numpy()
+    else:
+        _geoFeatures_unlabeled = np.zeros((n_unlabeled, _geoFeatures_labeled.shape[1]))
+
+    print(f"  Unlabeled: {n_unlabeled} stations, WRF={cfd_unlabeled.shape[2]}d")
+    print(f"  GeoEmbed: labeled={_geoFeatures_labeled.shape[1]}d, unlabeled={_geoFeatures_unlabeled.shape[1]}d")
+
+    # ======================== Normalize WRF & CLMS ========================
+    print("Normalizing features...")
+    cfd_labeled_norm, cfd_off, cfd_scl = utils.MinMax(cfd_labeled.copy())
+    clms_labeled_norm, clms_off, clms_scl = utils.MinMax(clms_labeled.copy())
+    targets_norm, tgt_off, tgt_scl = utils.MinMax(targets_labeled.copy())
+
+    # Normalize unlabeled independently
+    cfd_unlabeled_norm, _, _ = utils.MinMax(cfd_unlabeled.copy())
+    clms_unlabeled_norm, _, _ = utils.MinMax(clms_unlabeled.copy())
+
+    # ======================== Build unified graph ========================
+    print("Building unified graph (labeled + unlabeled)...")
+
+    # Get Map and SimilarityMat for all nodes from V2 source
+    if 'usable_station_indices' in labeled:
+        usable_idx = labeled['usable_station_indices'].squeeze().astype(int)
+        Map_labeled = unlabeled['Map'][:106][usable_idx]
+        SM_labeled = unlabeled['SimilarityMat'][:106][usable_idx]
+    else:
+        Map_labeled = np.squeeze(labeled['Map'])
+        SM_labeled = np.squeeze(labeled['SimilarityMat'])
+
+    Map_unlabeled = unlabeled['Map'][start_idx:end_idx]
+    SM_unlabeled = unlabeled['SimilarityMat'][start_idx:end_idx]
+
+    nNodes_total = nNodes_labeled + n_unlabeled
+
+    # --- Block-wise graph construction ---
+    # L-L, U-U, L-U computed separately with independent distance normalization
+    # This ensures L-L connectivity matches supervised learning exactly
+    thres_ll = dataParam.get('thres_ll', 0.1)   # same as supervised
+    thres_uu = dataParam.get('thres_uu', 0.4)
+    thres_lu = dataParam.get('thres_lu', 0.4)
+
+    # L-L block (same as supervised graph)
+    Adj_ll = build_adj_matrix(Map_labeled, SM_labeled, thres_ll)
+
+    # U-U block
+    Adj_uu = build_adj_matrix(Map_unlabeled, SM_unlabeled, thres_uu)
+
+    # L-U block (cross edges, independent normalization)
+    Map_cross = np.vstack([Map_labeled, Map_unlabeled])
+    SM_cross = np.vstack([SM_labeled, SM_unlabeled])
+    Adj_cross_full = build_adj_matrix(Map_cross, SM_cross, thres_lu)
+    Adj_lu = Adj_cross_full[:nNodes_labeled, nNodes_labeled:]  # extract L-U block
+
+    # Assemble unified adjacency matrix
+    Adj = np.zeros((nNodes_total, nNodes_total))
+    Adj[:nNodes_labeled, :nNodes_labeled] = Adj_ll
+    Adj[nNodes_labeled:, nNodes_labeled:] = Adj_uu
+    Adj[:nNodes_labeled, nNodes_labeled:] = Adj_lu
+    Adj[nNodes_labeled:, :nNodes_labeled] = Adj_lu.T
+    np.fill_diagonal(Adj, 0)
     assert np.allclose(Adj, Adj.T)
-    
-    # --------------------------处理有标签数据的特征--------------------------
-    _raw = mat73.loadmat(f'{path}/GNN_N1_StationMat.mat')['StationMat_se_fill']
-    _raw = np.transpose(_raw, (0, 2, 1))  # (timestep, nNodes, nFeatures)
-    
-    nCFDFeats = 54
-    cfdIdx = np.arange(nCFDFeats)
-    # 静态地理特征（不包括最后3个CLMS动态特征）
-    rawGeoFeatIdx = np.arange(nCFDFeats + 4, _raw.shape[-1] - 3 - 1)
-    # CLMS动态特征
-    clmsIdx_labeled = np.arange(_raw.shape[-1] - 3 - 1, _raw.shape[-1] - 1)
-    
-    features_labeled = _raw[:, :, 1:]
-    targets_labeled = _raw[:, :, 0]
-    
-    # --------------------------处理无标签数据的特征--------------------------
-    # 转置为 (timestep, nNodes, nFeatures)
-    cfd_features_unlabeled = np.transpose(WRFMat_unlabeled, (0, 2, 1))  # (6624, n_unlabeled, 54)
-    clms_features_unlabeled = np.transpose(CLMSMat_unlabeled, (0, 2, 1))  # (6624, n_unlabeled, 3)
-    
-    # 对齐时间步
-    T_labeled = len(features_labeled)
-    T_unlabeled = len(cfd_features_unlabeled)
-    T = min(T_labeled, T_unlabeled)
-    
-    features_labeled = features_labeled[:T]
-    targets_labeled = targets_labeled[:T]
-    cfd_features_unlabeled = cfd_features_unlabeled[:T]
-    clms_features_unlabeled = clms_features_unlabeled[:T]
-    
-    # -----------------构建PyG数据集 ---------------------------
-    # 确保对称性
-    assert np.allclose(Adj, Adj.T)
-    
-    # 转换Adj矩阵为PyG格式
+
+    # # --- Old: unified computation (all nodes same normalization) ---
+    # Map_all = np.vstack([Map_labeled, Map_unlabeled])
+    # SM_all = np.vstack([SM_labeled, SM_unlabeled])
+    # Adj = build_adj_matrix(Map_all, SM_all, dataParam['thres'])
+    # assert np.allclose(Adj, Adj.T)
+
+    # Edge statistics
+    n_ll = int(np.sum(Adj[:nNodes_labeled, :nNodes_labeled] > 0) // 2)
+    n_uu = int(np.sum(Adj[nNodes_labeled:, nNodes_labeled:] > 0) // 2)
+    n_lu = int(np.sum(Adj[:nNodes_labeled, nNodes_labeled:] > 0))
+    total_edges = int(np.sum(Adj > 0) // 2)
+    density = total_edges / (nNodes_total * (nNodes_total - 1) / 2) * 100
+    print(f"  Graph: {nNodes_total} nodes, {total_edges*2} edges, density={density:.1f}%")
+    print(f"  L-L={n_ll} (thres={thres_ll}), U-U={n_uu} (thres={thres_uu}), L-U={n_lu} (thres={thres_lu})")
+
+    # ======================== Build PyG dataset ========================
     edgeIdxV, edgeAttrV = pyg_utils.dense_to_sparse(torch.FloatTensor(Adj))
-    
+
+    label_mask = np.zeros(nNodes_total, dtype=bool)
+    label_mask[:nNodes_labeled] = True
+
+    # Align UrbanFeature dimensions
+    if UF_labeled_norm is not None and UF_unlabeled_norm is not None:
+        # Both have UrbanFeature, ensure same dim
+        uf_dim = UF_labeled_norm.shape[1]
+        if UF_unlabeled_norm.shape[1] != uf_dim:
+            UF_unlabeled_padded = np.zeros((n_unlabeled, uf_dim))
+            UF_unlabeled_padded[:, :UF_unlabeled_norm.shape[1]] = UF_unlabeled_norm
+            UF_unlabeled_norm = UF_unlabeled_padded
+    elif UF_labeled_norm is not None:
+        UF_unlabeled_norm = np.zeros((n_unlabeled, UF_labeled_norm.shape[1]))
+
+    T = T_2018
     _dataset = []
-    
-    # 创建标签掩码
-    label_mask = np.zeros(_nNodes_total, dtype=bool)
-    label_mask[:_nNodes_labeled] = True
-    
     for n in range(_window, T - _window):
-        # ========== 有标签节点的特征 ==========
-        _feature_labeled = features_labeled[n]
-        # 历史时间窗口
-        _tdb_labeled = features_labeled[n - _window:n, :, cfdIdx]
-        _tdb_labeled = np.transpose(_tdb_labeled, (1, 0, 2)).reshape(_nNodes_labeled, -1)
-        # 未来时间窗口（根据geoFeatures决定）
-        if dataParam.get('geoFeatures', 'full') == 'full':
-            _tdf_labeled = None
-        else:
-            _tdf_labeled = features_labeled[n:n + _window, :, cfdIdx]
-            _tdf_labeled = np.transpose(_tdf_labeled, (1, 0, 2)).reshape(_nNodes_labeled, -1)
-        
-        # ========== 无标签节点的特征 ==========
-        _cfd_unlabeled = cfd_features_unlabeled[n]
-        _clms_unlabeled = clms_features_unlabeled[n]
-        # 历史时间窗口
-        _tdb_unlabeled = cfd_features_unlabeled[n - _window:n]
-        _tdb_unlabeled = np.transpose(_tdb_unlabeled, (1, 0, 2)).reshape(n_unlabeled, -1)
-        # 未来时间窗口
-        if dataParam.get('geoFeatures', 'full') == 'full':
-            _tdf_unlabeled = None
-        else:
-            _tdf_unlabeled = cfd_features_unlabeled[n:n + _window]
-            _tdf_unlabeled = np.transpose(_tdf_unlabeled, (1, 0, 2)).reshape(n_unlabeled, -1)
-        
-        # ========== 组合特征（参考dataGen_ESTnet的逻辑）==========
-        # 有标签节点特征组合
-        if _tdf_labeled is not None:
-            feature_labeled_combined = np.hstack([
-                _feature_labeled[:, cfdIdx],      # 当前CFD特征
-                _tdb_labeled, _tdf_labeled,       # 历史+未来时间窗口
-                _feature_labeled[:, clmsIdx_labeled],  # CLMS动态特征
-                _feature_labeled[:, rawGeoFeatIdx],    # 静态地理特征
-                _geoFeatures_labeled                   # 空间嵌入特征
-            ])
-        else:
-            feature_labeled_combined = np.hstack([
-                _feature_labeled[:, cfdIdx],      # 当前CFD特征
-                _tdb_labeled,                     # 历史时间窗口
-                _feature_labeled[:, clmsIdx_labeled],  # CLMS动态特征
-                _feature_labeled[:, rawGeoFeatIdx],    # 静态地理特征
-                _geoFeatures_labeled                   # 空间嵌入特征
-            ])
-        
-        # 无标签节点特征组合
-        # 扩展UrbanFeature为与有标签数据相同的特征空间
-        urban_feature_expanded = np.zeros((n_unlabeled, len(rawGeoFeatIdx)))
-        urban_feature_expanded[:, :UrbanFeature_unlabeled.shape[1]] = UrbanFeature_unlabeled
-        
-        if _tdf_unlabeled is not None:
-            feature_unlabeled_combined = np.hstack([
-                _cfd_unlabeled,                    # 当前CFD特征
-                _tdb_unlabeled, _tdf_unlabeled,   # 历史+未来时间窗口
-                _clms_unlabeled,                   # CLMS动态特征
-                urban_feature_expanded,            # 静态地理特征（对齐维度）
-                _geoFeatures_unlabeled             # 空间嵌入特征
-            ])
-        else:
-            feature_unlabeled_combined = np.hstack([
-                _cfd_unlabeled,                    # 当前CFD特征
-                _tdb_unlabeled,                    # 历史时间窗口
-                _clms_unlabeled,                   # CLMS动态特征
-                urban_feature_expanded,            # 静态地理特征（对齐维度）
-                _geoFeatures_unlabeled             # 空间嵌入特征
-            ])
-        
-        # 合并所有节点的特征
-        features_all = np.vstack([feature_labeled_combined, feature_unlabeled_combined])
-        
-        # 目标值（只有有标签节点有目标）
+        # ===== Labeled node features =====
+        _cfd_l = cfd_labeled_norm[n]          # (nL, 63)
+        _clms_l = clms_labeled_norm[n]        # (nL, 3)
+        _tdb_l = cfd_labeled_norm[n - _window:n]
+        _tdb_l = np.transpose(_tdb_l, (1, 0, 2)).reshape(nNodes_labeled, -1)
+        _tdf_l = cfd_labeled_norm[n:n + _window]
+        _tdf_l = np.transpose(_tdf_l, (1, 0, 2)).reshape(nNodes_labeled, -1)
+
+        feat_l = [_cfd_l, _tdb_l, _tdf_l, _clms_l]
+        if UF_labeled_norm is not None:
+            feat_l.append(UF_labeled_norm)
+        if dataParam.get('geoFeatures', 'full') != 'no':
+            feat_l.append(_geoFeatures_labeled)
+        feature_labeled = np.hstack(feat_l)
+
+        # ===== Unlabeled node features =====
+        _cfd_u = cfd_unlabeled_norm[n]        # (nU, 63)
+        _clms_u = clms_unlabeled_norm[n]      # (nU, 3)
+        _tdb_u = cfd_unlabeled_norm[n - _window:n]
+        _tdb_u = np.transpose(_tdb_u, (1, 0, 2)).reshape(n_unlabeled, -1)
+        _tdf_u = cfd_unlabeled_norm[n:n + _window]
+        _tdf_u = np.transpose(_tdf_u, (1, 0, 2)).reshape(n_unlabeled, -1)
+
+        feat_u = [_cfd_u, _tdb_u, _tdf_u, _clms_u]
+        if UF_unlabeled_norm is not None:
+            feat_u.append(UF_unlabeled_norm)
+        if dataParam.get('geoFeatures', 'full') != 'no':
+            feat_u.append(_geoFeatures_unlabeled)
+        feature_unlabeled = np.hstack(feat_u)
+
+        # Combine all nodes
+        features_all = np.vstack([feature_labeled, feature_unlabeled])
+
+        # Targets (only labeled have real targets)
         targets_all = np.concatenate([
-            targets_labeled[n],
+            targets_norm[n],
             np.zeros(n_unlabeled)
         ]).reshape(-1, 1)
-        
-        _dataset.append(
-            Data(
-                x=torch.FloatTensor(features_all),
-                y=torch.FloatTensor(targets_all),
-                label_mask=torch.BoolTensor(label_mask),
-                edge_index=edgeIdxV,
-                edge_attr=edgeAttrV
-            )
-        )
-    
-    # 特征索引跟踪
-    if dataParam.get('geoFeatures', 'full') == 'full':
-        _cfdFeatLen = len(cfdIdx) * (_window + 1)  # 当前+历史窗口
-    else:
-        _cfdFeatLen = len(cfdIdx) * (2 * _window + 1)  # 当前+历史+未来窗口
-    _clmsFeatLen = len(clmsIdx_labeled)
-    _rawGeoFeatLen = len(rawGeoFeatIdx)
-    _geoFeatLen = _geoFeatures_labeled.shape[1]
-    _featureLen = np.cumsum([_cfdFeatLen, _clmsFeatLen, _rawGeoFeatLen, _geoFeatLen])
+
+        _dataset.append(Data(
+            x=torch.FloatTensor(features_all),
+            y=torch.FloatTensor(targets_all),
+            label_mask=torch.BoolTensor(label_mask),
+            edge_index=edgeIdxV,
+            edge_attr=edgeAttrV
+        ))
+
+    # Feature index tracking
+    _cfdFeatLen = nCFDFeats * (2 * _window + 1)
+    _clmsFeatLen = clms_labeled.shape[2]
+    _urbanFeatLen = UF_labeled_norm.shape[1] if UF_labeled_norm is not None else 0
+    _geoFeatLen = _geoFeatures_labeled.shape[1] if dataParam.get('geoFeatures', 'full') != 'no' else 0
+    _featureLen = np.cumsum([_cfdFeatLen, _clmsFeatLen, _urbanFeatLen, _geoFeatLen])
     _featureIdx = {
-        'CFD':      np.arange(0, _featureLen[0]),
-        'CLMS':     np.arange(_featureLen[0], _featureLen[1]),
-        'rawGeo':   np.arange(_featureLen[1], _featureLen[2]),
+        'CFD': np.arange(0, _featureLen[0]),
+        'CLMS': np.arange(_featureLen[0], _featureLen[1]),
+        'UrbanFeature': np.arange(_featureLen[1], _featureLen[2]),
         'embedGeo': np.arange(_featureLen[2], _featureLen[3]),
     }
 
-    # 数据集分割
+    print(f"  Total feature dim: {features_all.shape[-1]} "
+          f"(WRF={_cfdFeatLen} + CLMS={_clmsFeatLen} + UF={_urbanFeatLen} + Geo={_geoFeatLen})")
+
+    # Train/valid split
     _generator = torch.Generator().manual_seed(19)
-    _trainLength = int(len(_dataset)*nTrn)
-    _validLength = len(_dataset)-_trainLength  
-    trainSet, validSet = torch.utils.data.random_split(_dataset,[_trainLength,_validLength],_generator)
-    trainLoader = DataLoader(trainSet,batch_size=_batchSize,shuffle=not predMode) 
-    # 验证集使用与训练集相同的batch_size，避免OOM
-    valid_batch_size = min(_batchSize, len(validSet))  # 不超过验证集大小
-    validLoader = DataLoader(validSet,batch_size=valid_batch_size,shuffle=False)
+    _trainLength = int(len(_dataset) * nTrn)
+    _validLength = len(_dataset) - _trainLength
+    trainSet, validSet = torch.utils.data.random_split(
+        _dataset, [_trainLength, _validLength], _generator)
+    _shuffle_train = dataParam.get('shuffle_train', not predMode)
+    trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=_shuffle_train)
+    valid_batch_size = min(_batchSize, len(validSet))
+    validLoader = DataLoader(validSet, batch_size=valid_batch_size, shuffle=False)
 
     metadata = {
-        'nNodes':    _nNodes_total,  # 总节点数268
-        'nNodes_labeled': _nNodes_labeled,  # 有标签节点数68
-        'nNodes_unlabeled': n_unlabeled,  # 无标签节点数200
-        'geoOff':    _off,
-        'geoScl':    _scl,
-        'iDim':      features_all.shape[-1],
-        'oDim':      targets_all.shape[-1],
-        'featureIdx':_featureIdx,
+        'nNodes': nNodes_total,
+        'nNodes_labeled': nNodes_labeled,
+        'nNodes_unlabeled': n_unlabeled,
+        'geoOff': _off,
+        'geoScl': _scl,
+        'iDim': features_all.shape[-1],
+        'oDim': 1,
+        'featureIdx': _featureIdx,
         'geoMethod': dataParam['geoMethod'],
-        'poolSize':  dataParam['poolSize'],
-        'nCompPCA':  dataParam['nCompPCA'],
-        'trainIdx':  trainSet.indices,
-        'validIdx':  validSet.indices,
+        'poolSize': dataParam['poolSize'],
+        'nCompPCA': dataParam['nCompPCA'],
+        'trainIdx': trainSet.indices,
+        'validIdx': validSet.indices,
         'AdjMatrix': Adj,
-        'label_mask': label_mask,  # 添加标签掩码
+        'label_mask': label_mask,
+        'tgt_off': tgt_off,
+        'tgt_scl': tgt_scl,
     }
     return trainLoader, validLoader, metadata, validSet

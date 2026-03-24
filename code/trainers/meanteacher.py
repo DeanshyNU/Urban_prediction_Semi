@@ -9,6 +9,62 @@ from utils import RMSE
 from copy import deepcopy
 
 
+def gnn_augment(x, edge_index, edge_attr, noise_std=0.15, edge_drop_rate=0.15,
+                feat_mask_rate=0.15):
+    """
+    GNN-aware stochastic augmentation for creating different views.
+    Designed for urban spatial prediction with weather/climate features.
+
+    Three types of perturbation (applied independently per call):
+    1. Feature noise: Gaussian noise on node features (simulates WRF/CLMS measurement uncertainty)
+    2. Edge dropout: randomly removes edges (forces model to learn robust spatial relationships)
+    3. Feature masking: randomly zeros out entire feature dimensions (prevents over-reliance on
+       specific WRF channels, e.g. model must predict without wind speed or without humidity)
+
+    Default rates (0.15) are based on GNN augmentation literature:
+    - DropEdge (ICLR 2020): 10-20% edge drop
+    - Data Augmentation for GNNs (AAAI 2021): 10-20% feature mask
+    - Higher than previous 0.1 to create meaningful prediction differences for MT consistency loss
+
+    Args:
+        x: node features (N, D)
+        edge_index: edge indices (2, E)
+        edge_attr: edge weights (E,)
+        noise_std: std of Gaussian noise added to features
+        edge_drop_rate: fraction of edges to randomly drop
+        feat_mask_rate: fraction of feature dimensions to randomly mask
+    Returns:
+        x_aug, edge_index_aug, edge_attr_aug
+    """
+    # 1. Feature noise (simulates WRF/CLMS measurement uncertainty)
+    x_aug = x + torch.randn_like(x) * noise_std
+
+    # 2. Edge dropout (forces robust spatial relationship learning)
+    if edge_drop_rate > 0 and edge_index.size(1) > 0:
+        num_edges = edge_index.size(1)
+        keep_mask = torch.rand(num_edges, device=edge_index.device) > edge_drop_rate
+        # Ensure at least 50% of edges are kept
+        if keep_mask.sum() < num_edges * 0.5:
+            keep_mask = torch.rand(num_edges, device=edge_index.device) > 0.5
+        edge_index_aug = edge_index[:, keep_mask]
+        edge_attr_aug = edge_attr[keep_mask] if edge_attr is not None else None
+    else:
+        edge_index_aug = edge_index
+        edge_attr_aug = edge_attr
+
+    # 3. Feature masking (prevents over-reliance on specific WRF channels)
+    # Masks entire feature dimensions (columns), so all nodes lose the same features
+    if feat_mask_rate > 0:
+        feat_dim = x_aug.size(1)
+        mask = torch.rand(feat_dim, device=x_aug.device) > feat_mask_rate
+        # Ensure at least 50% of features are kept
+        if mask.sum() < feat_dim * 0.5:
+            mask = torch.rand(feat_dim, device=x_aug.device) > 0.5
+        x_aug = x_aug * mask.float().unsqueeze(0)
+
+    return x_aug, edge_index_aug, edge_attr_aug
+
+
 def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=5e-5, predMode=False):
     """Load or initialize checkpoint"""
     chkptPath = f'{modelName}.pt'
@@ -56,31 +112,21 @@ def _set_model_nNodes(model, nNodes):
 
 def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lossFn, consistency_loss_fn,
                       opt, scheduler, device, nNodes, lambda_U=1.0, alpha=0.999, global_step=0,
-                      unlabeled_nNodes=None):
+                      unlabeled_nNodes=None, noise_std=0.15, edge_drop_rate=0.15,
+                      feat_mask_rate=0.15):
     """
-    Mean Teacher training function
+    Standard Mean Teacher training (independent graph version)
+    with GNN-aware augmentation on both labeled and unlabeled data.
 
-    Args:
-        loader: labeled data loader
-        unlabeled_loader: unlabeled data loader
-        student_model: student model
-        teacher_model: teacher model (EMA)
-        lossFn: labeled loss function
-        consistency_loss_fn: consistency loss function (MSE)
-        opt: optimizer
-        scheduler: learning rate scheduler
-        device: device
-        nNodes: labeled data node count
-        lambda_U: unlabeled loss weight
-        alpha: EMA coefficient
-        global_step: current global step
-        unlabeled_nNodes: unlabeled data node count (optional)
-
-    Returns:
-        total_loss, rmse, truth, pred, epoch_debug
+    Key changes from basic MT:
+    - Both student and teacher in train mode (dropout as implicit noise)
+    - GNN augmentation (feature noise + edge dropout + feature masking) creates
+      meaningful prediction differences for consistency loss
+    - Consistency loss on unlabeled data with augmented views
+    - Labeled data also augmented (per standard MT: same treatment for all data)
     """
     student_model.train()
-    teacher_model.eval()
+    teacher_model.train()  # train mode for dropout noise
 
     if unlabeled_nNodes is None:
         unlabeled_nNodes = nNodes
@@ -97,23 +143,32 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
 
         opt.zero_grad(set_to_none=True)
 
-        # Labeled loss
+        # Labeled: student sees augmented view, loss against ground truth
         _set_model_nNodes(student_model, nNodes)
-        student_logits = student_model(batch.x, batch.edge_index, batch.edge_attr)
+        student_x_l, student_ei_l, student_ea_l = gnn_augment(
+            batch.x, batch.edge_index, batch.edge_attr,
+            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
+            feat_mask_rate=feat_mask_rate)
+        student_logits = student_model(student_x_l, student_ei_l, student_ea_l)
         labeled_loss = lossFn(student_logits, batch.y)
 
-        # Consistency loss
+        # Unlabeled: two independent augmented views for consistency
         _set_model_nNodes(student_model, unlabeled_nNodes)
         _set_model_nNodes(teacher_model, unlabeled_nNodes)
 
-        with torch.no_grad():
-            teacher_predictions = teacher_model(
-                unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr
-            )
+        student_x_u, student_ei_u, student_ea_u = gnn_augment(
+            unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr,
+            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
+            feat_mask_rate=feat_mask_rate)
+        teacher_x_u, teacher_ei_u, teacher_ea_u = gnn_augment(
+            unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr,
+            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
+            feat_mask_rate=feat_mask_rate)
 
-        student_predictions = student_model(
-            unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr
-        )
+        with torch.no_grad():
+            teacher_predictions = teacher_model(teacher_x_u, teacher_ei_u, teacher_ea_u)
+
+        student_predictions = student_model(student_x_u, student_ei_u, student_ea_u)
 
         _set_model_nNodes(student_model, nNodes)
         _set_model_nNodes(teacher_model, nNodes)
@@ -174,13 +229,19 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
 
 def train_meanteacher_unified(loader, student_model, teacher_model, lossFn, consistency_loss_fn,
                               opt, scheduler, device, n_labeled, lambda_U=1.0, alpha=0.999,
-                              global_step=0):
+                              global_step=0, noise_std=0.15, edge_drop_rate=0.15,
+                              feat_mask_rate=0.15):
     """
-    统一图版本的 Mean Teacher 训练函数
-    loader 中每个 Data 包含 labeled_mask 和 unlabeled_mask
+    Standard Mean Teacher training (per CuriousAI official implementation)
+    with GNN-aware augmentation:
+    - Student and Teacher both in train mode (both have dropout noise)
+    - Two independent GNN augmentations: feature noise + edge dropout + feature masking
+    - Supervised loss: only on labeled nodes
+    - Consistency loss: on ALL nodes (labeled + unlabeled)
+    - Teacher updated via EMA, no gradient
     """
     student_model.train()
-    teacher_model.eval()
+    teacher_model.train()  # train mode for dropout noise η'
 
     total_labeled_loss = 0
     total_consistency_loss = 0
@@ -192,18 +253,29 @@ def train_meanteacher_unified(loader, student_model, teacher_model, lossFn, cons
         batch = batch.to(device)
         opt.zero_grad(set_to_none=True)
 
-        # 整图前向（student 和 teacher）
-        all_student = student_model(batch.x, batch.edge_index, batch.edge_attr)
+        # Create two independent GNN-augmented views (per official MT + GNN augmentation)
+        # View 1 (student): feature noise η + edge dropout + feature masking
+        # View 2 (teacher): feature noise η' + different edge dropout + different feature masking
+        student_x, student_ei, student_ea = gnn_augment(
+            batch.x, batch.edge_index, batch.edge_attr,
+            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
+            feat_mask_rate=feat_mask_rate)
+        teacher_x, teacher_ei, teacher_ea = gnn_augment(
+            batch.x, batch.edge_index, batch.edge_attr,
+            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
+            feat_mask_rate=feat_mask_rate)
+
+        # Forward: both models process different augmented views of the unified graph
+        all_student = student_model(student_x, student_ei, student_ea)
         with torch.no_grad():
-            all_teacher = teacher_model(batch.x, batch.edge_index, batch.edge_attr)
+            all_teacher = teacher_model(teacher_x, teacher_ei, teacher_ea)
 
-        # 用 mask 提取 labeled / unlabeled 节点
+        # Supervised loss: only on labeled nodes
         labeled_pred = all_student[batch.labeled_mask]
-        unlabeled_student = all_student[batch.unlabeled_mask]
-        unlabeled_teacher = all_teacher[batch.unlabeled_mask]
-
         labeled_loss = lossFn(labeled_pred, batch.y)
-        consistency_loss = consistency_loss_fn(unlabeled_student, unlabeled_teacher)
+
+        # Consistency loss: on ALL nodes (per official MT implementation)
+        consistency_loss = consistency_loss_fn(all_student, all_teacher)
         total_loss = labeled_loss + lambda_U * consistency_loss
         total_loss.backward()
 
@@ -226,14 +298,14 @@ def train_meanteacher_unified(loader, student_model, teacher_model, lossFn, cons
         debug_stats['labeled_loss'].append(labeled_loss.item())
         debug_stats['consistency_loss'].append(consistency_loss.item())
         debug_stats['total_loss'].append(total_loss.item())
-        debug_stats['teacher_pred_mean'].append(unlabeled_teacher.mean().item())
-        debug_stats['teacher_pred_std'].append(unlabeled_teacher.std().item())
-        debug_stats['student_pred_mean'].append(unlabeled_student.mean().item())
-        debug_stats['student_pred_std'].append(unlabeled_student.std().item())
+        debug_stats['teacher_pred_mean'].append(all_teacher.mean().item())
+        debug_stats['teacher_pred_std'].append(all_teacher.std().item())
+        debug_stats['student_pred_mean'].append(all_student.mean().item())
+        debug_stats['student_pred_std'].append(all_student.std().item())
         debug_stats['student_logits_mean'].append(labeled_pred.mean().item())
         debug_stats['student_logits_std'].append(labeled_pred.std().item())
-        debug_stats['pred_diff_mean'].append((unlabeled_student - unlabeled_teacher).abs().mean().item())
-        debug_stats['pred_diff_max'].append((unlabeled_student - unlabeled_teacher).abs().max().item())
+        debug_stats['pred_diff_mean'].append((all_student - all_teacher).abs().mean().item())
+        debug_stats['pred_diff_max'].append((all_student - all_teacher).abs().max().item())
         debug_stats['grad_norm_before_clip'].append(grad_norm_before.item() if torch.is_tensor(grad_norm_before) else grad_norm_before)
         debug_stats['grad_norm_after_clip'].append(grad_norm_after)
 
@@ -261,6 +333,7 @@ def test_meanteacher_unified_ablation(loader, model, lossFn, device, n_labeled):
     """
     model.eval()
     rmse_full_list, rmse_labeled_only_list = [], []
+    total_nodes = n_labeled + 200  # labeled + unlabeled per graph
 
     with torch.no_grad():
         for batch in loader:
@@ -274,18 +347,21 @@ def test_meanteacher_unified_ablation(loader, model, lossFn, device, n_labeled):
             labeled_logits_full = all_logits[batch.labeled_mask].reshape(-1, n_labeled)
 
             # --- 仅labeled子图（去掉unlabeled节点）---
-            # 只保留labeled节点的特征和边
             labeled_mask = batch.labeled_mask
+            n_labeled_total = int(labeled_mask.sum().item())  # batch中所有labeled节点数
             labeled_x = batch.x[labeled_mask]
+
             # 过滤只含labeled节点的边
             src, dst = batch.edge_index
             edge_mask = labeled_mask[src] & labeled_mask[dst]
             labeled_edge_index_raw = batch.edge_index[:, edge_mask]
             labeled_edge_attr = batch.edge_attr[edge_mask] if batch.edge_attr is not None else None
-            # 重新映射节点编号（0~n_labeled-1）
+
+            # 重新映射节点编号：labeled节点在batch中的全局索引 → 连续的0~n_labeled_total-1
             node_map = torch.full((batch.x.shape[0],), -1, dtype=torch.long, device=batch.x.device)
-            node_map[labeled_mask] = torch.arange(n_labeled, device=batch.x.device)
+            node_map[labeled_mask] = torch.arange(n_labeled_total, device=batch.x.device)
             labeled_edge_index = node_map[labeled_edge_index_raw]
+
             logits_labeled_only = model(labeled_x, labeled_edge_index, labeled_edge_attr)
             logits_labeled_only = logits_labeled_only.reshape(-1, n_labeled)
 

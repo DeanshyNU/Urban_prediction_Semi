@@ -1,13 +1,14 @@
 import torch,os,utils
 import numpy as np
-from torch_geometric.nn import GraphConv
-# -----------------Construct GNN model---------------------------  
+from torch_geometric.nn import GraphConv, SAGEConv, APPNP
+# -----------------Construct GNN model---------------------------
 class GNN(torch.nn.Module):
 
     def __init__(self,modelPara):
         super(GNN, self).__init__()
         self.nGNNLayers = modelPara['nGNN']
         self.nMLPLayers = modelPara['nMLP']
+        self.conv_type = modelPara.get('conv_type', 'graphconv').lower()
         _HLD = modelPara['HLD']
         _encoder, _processor, _decoder = [],[],[]
 
@@ -20,7 +21,17 @@ class GNN(torch.nn.Module):
         for _n in range(self.nGNNLayers):
             _inputChannel = _HLD
             _outputChannel = _HLD
-            _processor.append(GraphConv(_inputChannel,_outputChannel,aggr='mean'))
+            if self.conv_type == 'sageconv':
+                _processor.append(SAGEConv(_inputChannel, _outputChannel, aggr='mean'))
+            elif self.conv_type == 'appnp':
+                # APPNP only needs one linear layer, uses K-step propagation
+                if _n == 0:
+                    _processor.append(torch.nn.Linear(_inputChannel, _outputChannel))
+                    _processor.append(torch.nn.PReLU(_outputChannel))
+                    _processor.append(APPNP(K=10, alpha=0.1))
+                continue
+            else:  # graphconv (default)
+                _processor.append(GraphConv(_inputChannel, _outputChannel, aggr='mean'))
             _processor.append(torch.nn.PReLU(_outputChannel))
 
         for _n in range(self.nMLPLayers):
@@ -32,14 +43,19 @@ class GNN(torch.nn.Module):
         self.encoder = torch.nn.ModuleList(_encoder)
         self.processor = torch.nn.ModuleList(_processor)
         self.decoder = torch.nn.ModuleList(_decoder)
-    
+
     def forward(self, x, edgeIdx, edgeAttr):
         for _f in self.encoder:
             x = _f(x)
-        # x_copy = x.clone()
-        for _n,_f in enumerate(self.processor):
-                x = _f(x, edgeIdx, edgeAttr) if not _n%2 else _f(x)
-        # x = x + x_copy # skip connection
+        for _n, _f in enumerate(self.processor):
+            if isinstance(_f, (GraphConv,)):
+                x = _f(x, edgeIdx, edgeAttr)
+            elif isinstance(_f, (SAGEConv,)):
+                x = _f(x, edgeIdx)
+            elif isinstance(_f, (APPNP,)):
+                x = _f(x, edgeIdx, edgeAttr)
+            else:
+                x = _f(x)
         for _f in self.decoder:
             x = _f(x)
         return x

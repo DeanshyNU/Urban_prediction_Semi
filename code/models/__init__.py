@@ -1,4 +1,4 @@
-from .gnn import GNN
+from .gnn import GNN, FeatureGNN
 from .backbones import (
     MLPModel, TransformerModel, CNNModel, LSTMModel,
     iTransformerModel, TimeMixerModel, ModernTCNModel,

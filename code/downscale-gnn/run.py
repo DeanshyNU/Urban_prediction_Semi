@@ -6,13 +6,15 @@ from datetime import datetime
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
-# 添加完整时间戳和SLURM作业ID到输出文件夹名称
+project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+conv_type = os.environ.get('CONV_TYPE', 'graphconv').lower()
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 job_id = os.environ.get('SLURM_JOB_ID', '')
+pool_size = os.environ.get('POOL_SIZE', '12')
 if job_id:
-    output_dir = f'./supervised_{timestamp}_job{job_id}'
+    output_dir = os.path.join(project_root, 'log', f'supervised_{conv_type}_pool{pool_size}_{timestamp}_job{job_id}')
 else:
-    output_dir = f'./supervised_{timestamp}'
+    output_dir = os.path.join(project_root, 'log', f'supervised_{conv_type}_pool{pool_size}_{timestamp}')
 os.makedirs(output_dir, exist_ok=True)
 
 def main():
@@ -21,7 +23,7 @@ def main():
             'geoMethod': 'average',
             'nCompPCA': 40,
             'window' : 2,
-            'poolSize': 12,
+            'poolSize': int(os.environ.get('POOL_SIZE', '12')),
             'batchSize': 512,
             'thres':    0.1,
             'geoFeatures':  'full',
@@ -41,14 +43,16 @@ def main():
             'oDim':     metadata['oDim'],
             'BN':       False,
             'Dropout':  False,
+            'conv_type': conv_type,
     }
-    modelName = f'geoEmbed_{dataParam["geoMethod"]}_gconv_full_{dataParam["geoFeatures"]}Geo'
-    
+    modelName = f'geoEmbed_{dataParam["geoMethod"]}_{conv_type}_full_{dataParam["geoFeatures"]}Geo'
+    wandb_name = f'{modelName}_pool{dataParam["poolSize"]}_job{job_id}' if job_id else modelName
+
     # 初始化 W&B
     wandb.init(
         entity="urban_prediction",
         project="Semi-supervised GNN",
-        name=modelName,
+        name=wandb_name,
         config={
             **dataParam,
             **modelParam,
@@ -61,8 +65,12 @@ def main():
     )
     
     model = (network.GNN(modelParam)).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt,gamma=0.9992)
+
+    # Early stopping
+    early_stop_patience = 300
+    early_stop_counter = 0
     lossFn = torch.nn.HuberLoss().to(device)
     # Load checkpoint or initialize training
     EPOCH,bestLoss,chkptPath,hist = network.loadCheckPoint(modelName,model,opt,device,load=False,output_dir=output_dir)
@@ -78,6 +86,12 @@ def main():
     for epoch in range(EPOCH,nEpoch):
         trainLoss,trainRMSE,_,_ = network.train(trainLoader,model,lossFn,opt,scheduler,device,metadata['nNodes'])
         validLoss,validRMSE,_,_ = network.test(validLoader,model,lossFn,device,metadata['nNodes'])
+        # Early NaN detection (print to stdout)
+        if epoch < 5 or epoch % 100 == 0:
+            print(f"Epoch {epoch}: train_loss={trainLoss:.4e}, train_rmse={trainRMSE[0]:.4f}, valid_rmse={validRMSE[0]:.4f}")
+        if np.isnan(trainLoss) or np.isnan(trainRMSE[0]):
+            print(f"ERROR: NaN detected at epoch {epoch}! Stopping.")
+            break
         with open(f'{output_dir}/{modelName}_log','a') as f: print("", file=f)
         with open(f'{output_dir}/{modelName}_log','a') as f: print (f"Epoch {epoch}: loss {trainLoss:1.4e}/{validLoss:1.4e}; RMSE {trainRMSE[0]:1.3f}/{validRMSE[0]:1.3f}; LR {scheduler.get_last_lr()} ",file=f)
         with open(f'{output_dir}/{modelName}_log','a') as f: print (f"RMSE std: {trainRMSE[1]:1.3f}/{validRMSE[1]:1.3f}; min: {trainRMSE[2]:1.3f}/{validRMSE[2]:1.3f}; max: {trainRMSE[3]:1.3f}/{validRMSE[3]:1.3f};",file=f)
@@ -102,6 +116,7 @@ def main():
         # Save best model
         if validRMSE[0]<bestLoss:
             bestLoss = validRMSE[0]
+            early_stop_counter = 0
             with open(f'{output_dir}/{modelName}_log','a') as f: print("Model saved.",file=f)
             wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
             torch.save({
@@ -110,6 +125,13 @@ def main():
                 'opt_state_dict':   opt.state_dict(),
                 'bestLoss':         bestLoss,
                 }, chkptPath)
+        else:
+            early_stop_counter += 1
+            if early_stop_counter >= early_stop_patience:
+                with open(f'{output_dir}/{modelName}_log','a') as f:
+                    print(f"\nEarly stopping at epoch {epoch}: no improvement for {early_stop_patience} epochs. Best valid RMSE: {bestLoss:.6f}", file=f)
+                print(f"Early stopping at epoch {epoch}. Best valid RMSE: {bestLoss:.6f}")
+                break
         # Plot training history
         hist.append([trainLoss,validLoss,trainRMSE[0],validRMSE[0]])
         utils.plotHist(hist,modelName,output_dir=output_dir)

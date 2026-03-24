@@ -27,9 +27,13 @@ def main():
     current_time = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     job_id = os.environ.get('SLURM_JOB_ID', 'local')
 
+    # 读取卷积类型
+    conv_type = os.environ.get('CONV_TYPE', 'graphconv')
+
     # 创建输出目录：方法名_时间_jobid
-    method_name = 'pimodel'
-    output_dir = f'/home/hhz6461/Urban_prediction_Semi/log/{method_name}_{current_time}_job{job_id}'
+    project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+    method_name = f'pimodel_{conv_type}'
+    output_dir = os.path.join(project_root, 'log', f'{method_name}_{current_time}_job{job_id}')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -84,11 +88,12 @@ def main():
         'HLD': 128,
         'nMLP': 2,
         'nGNN': 3,
-        'iDim': metadata['iDim'],  # 使用统一特征维度
+        'iDim': metadata['iDim'],
         'oDim': metadata['oDim'],
+        'conv_type': conv_type,
     }
 
-    modelName = f'geoEmbed_{dataParam["geoMethod"]}_pimodel_{dataParam["geoFeatures"]}Geo'
+    modelName = f'geoEmbed_{dataParam["geoMethod"]}_{conv_type}_pimodel_{dataParam["geoFeatures"]}Geo'
     model_path = os.path.join(output_dir, modelName)
     print("步骤3: 初始化模型、优化器和损失函数")
     model = GNN(modelParam).to(device)  # 使用统一的GNN模型

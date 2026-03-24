@@ -12,10 +12,10 @@ import wandb
 
 # 导入自定义模块
 from datalib import preprocess_unlabeled_data, dataGen_unified, TransformFixMatch
-# from datalib import dataGen, dataGen_unlabeled  # 独立图（已注释，保留备用）
-from models import GNN
+from datalib import dataGen, dataGen_unlabeled  # 独立图
+from models import GNN, FeatureGNN
 from trainers import train_meanteacher_unified, test_meanteacher_unified, loadCheckPoint, test_meanteacher_unified_ablation
-# from trainers import train_meanteacher, test_meanteacher  # 独立图（已注释，保留备用）
+from trainers import train_meanteacher, test_meanteacher  # 独立图
 from utils import plotHist
 
 # 设备配置
@@ -32,9 +32,13 @@ def main():
 
     # 读取卷积类型（默认 graphconv，可通过环境变量 CONV_TYPE=sage 切换）
     conv_type = os.environ.get('CONV_TYPE', 'graphconv')
+    # 图类型：unified（统一图）或 independent（独立图）
+    graph_type = os.environ.get('GRAPH_TYPE', 'unified')
+    # 模型类型：base（原始MLP编码器）或 feature（分支编码器+残差学习）
+    model_type = os.environ.get('MODEL_TYPE', 'base')
 
     # 创建输出目录：方法名_时间_jobid（相对项目根目录 Fixmatch_GNN/log/）
-    method_name = f'meanteacher_{conv_type}'
+    method_name = f'meanteacher_{conv_type}_{graph_type}{"_feature" if model_type == "feature" else ""}'
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_dir = os.path.join(project_root, 'log', f'{method_name}_{current_time}_job{job_id}')
     if not os.path.exists(output_dir):
@@ -57,31 +61,37 @@ def main():
         'geoMethod': 'average',
         'nCompPCA': 40,
         'window': 2,
-        'poolSize': 12,
+        'poolSize': 4 if model_type == 'feature' else 12,  # feature模式下压缩GeoEmbed（112维 vs 1008维）
         'batchSize': 128,
-        'thres': 0.1,
+        'thres': 0.4,             # 统一阈值（与 data_semi.py 一致）
         'geoFeatures': 'full',
     }
 
     ##----------------------数据增强----------------------
-    print("步骤1: 对无标签数据应用数据增强（Mean Teacher）")
+    print("步骤1: 对数据应用增强（labeled + unlabeled 统一增强，per original MT paper）")
     augmenter = TransformFixMatch(weak_n=2, weak_m=1.5, strong_n=3, strong_m=4.5, seed=42)
     augmented_data, _ = augmenter(unlabeled_data)
 
-    ##----------------------构建统一图数据集----------------------
-    print("步骤2: 构建统一图数据集（labeled + unlabeled，268节点）")
-    trainLoader, validLoader, metadata, _ = dataGen_unified(dataParam, DATA_PATH, augmented_data,
-                                                             output_dir=output_dir)
-
-    # --- 独立图（已注释，保留备用）---
-    # trainLoader, validLoader, metadata, _ = dataGen(dataParam, DATA_PATH)
-    # unlabeled_loader, _, _, _, _ = dataGen_unlabeled(dataParam, augmented_data, labeled=False,
-    #                                                   path=DATA_PATH, labeled_metadata=metadata)
-    # ---
-
-    print(f"统一图训练样本数量: {len(trainLoader.dataset)}")
-    print(f"统一图验证样本数量: {len(validLoader.dataset)}")
-    print(f"有标签节点: {metadata['n_labeled']}, 无标签节点: {metadata['n_unlabeled']}")
+    ##----------------------构建数据集----------------------
+    if graph_type == 'unified':
+        print("步骤2: 构建统一图数据集（labeled + unlabeled，268节点）")
+        # Pass augmenter so labeled data gets same augmentation as unlabeled
+        trainLoader, validLoader, metadata, _ = dataGen_unified(dataParam, DATA_PATH, augmented_data,
+                                                                 output_dir=output_dir,
+                                                                 augmenter=augmenter)
+        unlabeled_loader = None  # 统一图不需要单独的unlabeled loader
+        print(f"统一图训练样本数量: {len(trainLoader.dataset)}")
+        print(f"统一图验证样本数量: {len(validLoader.dataset)}")
+        print(f"有标签节点: {metadata['n_labeled']}, 无标签节点: {metadata['n_unlabeled']}")
+    else:
+        print("步骤2: 构建独立图数据集（labeled和unlabeled分开）")
+        trainLoader, validLoader, metadata, _ = dataGen(dataParam, DATA_PATH)
+        unlabeled_loader, _, _, _, _ = dataGen_unlabeled(dataParam, augmented_data, labeled=False,
+                                                          path=DATA_PATH, labeled_metadata=metadata)
+        print(f"Labeled训练样本数量: {len(trainLoader.dataset)}")
+        print(f"Labeled验证样本数量: {len(validLoader.dataset)}")
+        print(f"Unlabeled样本数量: {len(unlabeled_loader.dataset)}")
+        print(f"有标签节点: {metadata['nNodes']}")
 
     print("\n" + "="*60)
 
@@ -91,19 +101,22 @@ def main():
         'HLD': 128,
         'nMLP': 2,
         'nGNN': 3,
-        'iDim': metadata['iDim'],  # 使用统一特征维度
+        'iDim': metadata['iDim'],
         'oDim': metadata['oDim'],
         'conv_type': conv_type,
+        'model_type': model_type,
+        'window': dataParam['window'],          # for FeatureGNN (dynamic/static split)
+        'station_dim': 4,                       # for FeatureGNN (CLMS/station features)
     }
 
     modelName = f'geoEmbed_{dataParam["geoMethod"]}_meanteacher_{dataParam["geoFeatures"]}Geo'
     model_path = os.path.join(output_dir, modelName)
-    print("步骤3: 初始化学生模型和教师模型")
+    print(f"步骤3: 初始化学生模型和教师模型 (model_type={model_type})")
 
-    # 初始化学生模型
-    student_model = GNN(modelParam).to(device)  # 使用统一的GNN模型
-    # 初始化教师模型（作为学生模型的副本）
-    teacher_model = GNN(modelParam).to(device)  # 使用统一的GNN模型
+    # 选择模型类型
+    ModelClass = FeatureGNN if model_type == 'feature' else GNN
+    student_model = ModelClass(modelParam).to(device)
+    teacher_model = ModelClass(modelParam).to(device)
     # 复制学生模型的初始参数到教师模型
     for teacher_param, student_param in zip(teacher_model.parameters(), student_model.parameters()):
         teacher_param.data.copy_(student_param.data)
@@ -146,7 +159,7 @@ def main():
             'nEpoch': nEpoch,
             'lr': 1e-3,
             'scheduler_gamma': 0.9995,
-            'lambda_U': 3.0,
+            'lambda_U': 1.0,
             'ramp_epochs': 100,
             'ema_alpha': 0.999,
             'grad_clip_norm': 1.0,
@@ -163,16 +176,27 @@ def main():
         print(f"  输出目录: {output_dir}", file=f)
         print("  方法: Mean Teacher（教师-学生架构）", file=f)
         print("  数据增强: weak_n=2, weak_m=1.5（UrbanFeature不增强）", file=f)
-        print("  一致性损失: MSELoss", file=f)
+        print("  GNN增强: noise_std=0.15, edge_drop=15%, feat_mask=15%", file=f)
+        print("  一致性损失: MSELoss (on ALL nodes)", file=f)
         print("  优化: lr=1e-3, 学习率衰减=0.9995", file=f)
         print("  梯度裁剪: max_norm=1.0", file=f)
-        print(f"  无标签损失权重: lambda_U=3.0（带ramp-up, ramp_ep=100）", file=f)
+        print(f"  无标签损失权重: lambda_U=1.0（sigmoid ramp-up, ramp_ep=100）", file=f)
+        print(f"  EMA decay: 0.99 (epoch<100) → 0.999 (epoch>=100)", file=f)
         print("  EMA系数: alpha=0.999", file=f)
-        print(f"  模型: GNN ({conv_type})", file=f)
-        print(f"  图结构: 统一图（labeled={metadata['n_labeled']}节点 + unlabeled={metadata['n_unlabeled']}节点 = {metadata['total_nodes']}节点）", file=f)
+        if model_type == 'feature':
+            print(f"  模型: FeatureGNN ({conv_type}) — ESTNet-style 动态/静态分离", file=f)
+            print(f"    Dynamic branch: GRU (WRF 54ch×5steps + Station 4dim → 64dim)", file=f)
+            print(f"    Static branch: MLP (RawGeo+GeoEmbed → 64dim)", file=f)
+            print(f"    poolSize={dataParam['poolSize']} (GeoEmbed压缩)", file=f)
+        else:
+            print(f"  模型: GNN ({conv_type})", file=f)
+        if graph_type == 'unified':
+            print(f"  图结构: 统一图（labeled={metadata['n_labeled']}节点 + unlabeled={metadata['n_unlabeled']}节点 = {metadata['total_nodes']}节点）", file=f)
+        else:
+            print(f"  图结构: 独立图（labeled={metadata['nNodes']}节点，unlabeled单独处理）", file=f)
         print(f"  {n_unlabeled}个无标签站点", file=f)
         print("  特征: 统一特征向量（动态+静态合并）", file=f)
-        print(f"  图稀疏化阈值: thres={dataParam['thres']}, cross_thres={dataParam.get('cross_thres', 0.5)}", file=f)
+        print(f"  图稀疏化阈值: thres={dataParam['thres']}（统一阈值，参考data_semi.py）", file=f)
         print("  时间对齐: V2偏移26小时，只用V1对应时间段（2948步）", file=f)
         print("="*60, file=f)
 
@@ -180,33 +204,50 @@ def main():
     print("步骤4: 开始Mean Teacher训练")
     print(f"当前轮次: {EPOCH}, 总轮次: {nEpoch}")
 
-    def rampup_factor(epoch, ramp_ep=100):
-        """Ramp-up函数，用于逐渐增加无标签损失的权重"""
-        return min(1.0, epoch / ramp_ep)
+    def sigmoid_rampup(current, ramp_length):
+        """Sigmoid ramp-up (per official MT implementation).
+        Starts near 0, smooth transition, reaches 1.0 at ramp_length.
+        Formula: exp(-5.0 * (1 - current/ramp_length)^2)
+        """
+        if ramp_length == 0:
+            return 1.0
+        current = np.clip(current, 0.0, ramp_length)
+        phase = 1.0 - current / ramp_length
+        return float(np.exp(-5.0 * phase * phase))
+
+    def get_ema_decay(epoch, ramp_ep=100):
+        """EMA decay ramp-up (per official MT): 0.99 early → 0.999 later.
+        Early training: teacher follows student closely (faster update).
+        Later training: teacher is more stable (slower update).
+        """
+        if epoch < ramp_ep:
+            return 0.99
+        return 0.999
 
     global_step = 0
     for epoch in range(EPOCH, nEpoch):
-        ramp = rampup_factor(epoch, 100)
-        # Mean Teacher训练（统一图）
-        trainLoss, trainRMSE, _, _, epoch_debug = train_meanteacher_unified(
-            trainLoader, student_model, teacher_model, lossFn, consistency_loss_fn,
-            opt, scheduler, device, metadata['n_labeled'], lambda_U=3.0 * ramp, alpha=0.999,
-            global_step=global_step
-        )
-        # 使用教师模型进行验证（统一图）
-        validLoss, validRMSE, _, _ = test_meanteacher_unified(
-            validLoader, teacher_model, lossFn, device, metadata['n_labeled']
-        )
-        # --- 独立图（已注释，保留备用）---
-        # trainLoss, trainRMSE, _, _, epoch_debug = train_meanteacher(
-        #     trainLoader, unlabeled_loader, student_model, teacher_model, lossFn, consistency_loss_fn,
-        #     opt, scheduler, device, metadata['nNodes'], lambda_U=3.0 * ramp, alpha=0.999,
-        #     global_step=global_step
-        # )
-        # validLoss, validRMSE, _, _ = test_meanteacher(
-        #     validLoader, teacher_model, lossFn, device, metadata['nNodes']
-        # )
-        # ---
+        ramp = sigmoid_rampup(epoch, 100)
+        ema_alpha = get_ema_decay(epoch, 100)
+        if graph_type == 'unified':
+            # Mean Teacher训练（统一图）
+            trainLoss, trainRMSE, _, _, epoch_debug = train_meanteacher_unified(
+                trainLoader, student_model, teacher_model, lossFn, consistency_loss_fn,
+                opt, scheduler, device, metadata['n_labeled'], lambda_U=1.0 * ramp, alpha=ema_alpha,
+                global_step=global_step
+            )
+            validLoss, validRMSE, _, _ = test_meanteacher_unified(
+                validLoader, teacher_model, lossFn, device, metadata['n_labeled']
+            )
+        else:
+            # Mean Teacher训练（独立图）
+            trainLoss, trainRMSE, _, _, epoch_debug = train_meanteacher(
+                trainLoader, unlabeled_loader, student_model, teacher_model, lossFn, consistency_loss_fn,
+                opt, scheduler, device, metadata['nNodes'], lambda_U=1.0 * ramp, alpha=ema_alpha,
+                global_step=global_step
+            )
+            validLoss, validRMSE, _, _ = test_meanteacher(
+                validLoader, teacher_model, lossFn, device, metadata['nNodes']
+            )
 
         global_step += len(trainLoader)
 
@@ -245,7 +286,7 @@ def main():
             'valid/rmse_min': validRMSE[2],
             'valid/rmse_max': validRMSE[3],
             'learning_rate': scheduler.get_last_lr()[0],
-            'lambda_U': 3.0 * ramp,
+            'lambda_U': 1.0 * ramp,
             'ramp_factor': ramp,
             'global_step': global_step,
         }
@@ -267,8 +308,8 @@ def main():
             }, chkptPath)
             wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
 
-        # 每100个epoch做一次消融测试：统一图 vs 仅labeled子图
-        if epoch % 100 == 0:
+        # 每100个epoch做一次消融测试：统一图 vs 仅labeled子图（仅统一图模式）
+        if graph_type == 'unified' and epoch % 100 == 0:
             test_meanteacher_unified_ablation(validLoader, teacher_model, lossFn, device, metadata['n_labeled'])
 
         # 绘制训练历史
