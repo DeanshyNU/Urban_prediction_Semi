@@ -2,7 +2,8 @@
 Semi-supervised GNN data loading - V2 data format
 Labeled: Labeled_Finalized_new.mat (58 stations, 3672 timesteps)
 Unlabeled: Unlabeled_Finalized.mat (2000 stations, sliced to 3672)
-Unified graph: 58 labeled + 200 unlabeled = 258 nodes
+Unified graph: 58 labeled + N unlabeled nodes
+Station selection: FPS (Farthest Point Sampling) based on graph adjacency weights
 """
 import numpy as np
 import torch, pickle, os, mat73, utils
@@ -12,6 +13,157 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from sklearn.decomposition import PCA
 from data import genGeoFeatures_v2, build_adj_matrix
+
+
+def select_unlabeled_fps(Map_labeled, SM_labeled, Map_all_unlabeled, SM_all_unlabeled, n_select,
+                         UF_labeled=None, UF_all_unlabeled=None,
+                         Loc_labeled=None, Loc_all_unlabeled=None):
+    """
+    Three-step unlabeled station selection:
+      Step 1: Filter - remove unreachable (adj=0) and feature-outlier (top 5%) candidates
+      Step 2: Pure spatial FPS - select for spatial diversity only (no score weighting)
+      Step 3: (Done in graph construction) Adaptive threshold to control density
+
+    Returns:
+        selected_indices: (n_select,) indices into the candidate array
+    """
+    n_candidates = Map_all_unlabeled.shape[0]
+    n_labeled = Map_labeled.shape[0]
+    if n_select >= n_candidates:
+        return np.arange(n_candidates)
+
+    print(f"  [Station Selection] Candidates: {n_candidates}, Target: {n_select}")
+
+    # ========== Step 1: Filter candidates ==========
+    valid_mask = np.ones(n_candidates, dtype=bool)
+
+    # 1a. Remove candidates with no graph connection to any labeled station
+    max_adj_to_labeled = np.zeros(n_candidates)
+    # Compute normalized distances (all candidates to all labeled)
+    all_map_dists = np.zeros((n_candidates, n_labeled))
+    for j in range(n_labeled):
+        all_map_dists[:, j] = np.sqrt(np.sum((Map_all_unlabeled - Map_labeled[j:j+1])**2, axis=1))
+    global_max_dist = all_map_dists.max()
+    if global_max_dist == 0:
+        global_max_dist = 1.0
+    all_map_dists_norm = all_map_dists / global_max_dist
+
+    for i in range(n_candidates):
+        best_adj = 0.0
+        for j in range(n_labeled):
+            cov = np.corrcoef(SM_all_unlabeled[i], SM_labeled[j])
+            r = cov[0, 1] if not np.isnan(cov[0, 1]) else 0.0
+            r = max(r, 0.0)
+            adj_w = r * np.exp(-all_map_dists_norm[i, j])
+            if adj_w > best_adj:
+                best_adj = adj_w
+        max_adj_to_labeled[i] = best_adj
+
+    n_unreachable = int(np.sum(max_adj_to_labeled == 0))
+    valid_mask[max_adj_to_labeled == 0] = False
+    print(f"  [Step1] Unreachable (adj=0 to all labeled): {n_unreachable}/{n_candidates}")
+
+    # 1b. Remove UrbanFeature outliers (top 5% by distance to nearest labeled)
+    if UF_labeled is not None and UF_all_unlabeled is not None:
+        uf_mean = np.nanmean(UF_labeled, axis=0)
+        uf_std = np.nanstd(UF_labeled, axis=0)
+        uf_std[uf_std == 0] = 1.0
+        UF_l_std = (np.nan_to_num(UF_labeled, nan=0.0) - uf_mean) / uf_std
+        UF_u_std = (np.nan_to_num(UF_all_unlabeled, nan=0.0) - uf_mean) / uf_std
+
+        uf_dists = np.zeros(n_candidates)
+        for i in range(n_candidates):
+            d = np.sqrt(np.sum((UF_u_std[i:i+1] - UF_l_std)**2, axis=1))
+            uf_dists[i] = d.min()
+
+        threshold_95 = np.percentile(uf_dists[valid_mask], 95)
+        n_outlier = int(np.sum((uf_dists > threshold_95) & valid_mask))
+        valid_mask[uf_dists > threshold_95] = False
+        print(f"  [Step1] UrbanFeature outliers (top 5%, dist>{threshold_95:.2f}): {n_outlier}")
+        print(f"  [Step1] UF dist stats (valid): min={uf_dists[valid_mask].min():.2f}, "
+              f"max={uf_dists[valid_mask].max():.2f}, mean={uf_dists[valid_mask].mean():.2f}")
+    else:
+        print(f"  [Step1] UrbanFeature not provided, skipping outlier filter")
+
+    n_valid = int(np.sum(valid_mask))
+    print(f"  [Step1] Valid candidates after filtering: {n_valid}/{n_candidates}")
+
+    if n_select > n_valid:
+        print(f"  [Step1] WARNING: requested {n_select} > valid {n_valid}, using all valid")
+        return np.where(valid_mask)[0]
+
+    # ========== Step 2: Pure spatial FPS ==========
+    # Use NodeLocation (lat/lon) if available for true spatial distance
+    if Loc_labeled is not None and Loc_all_unlabeled is not None:
+        pos_labeled = Loc_labeled
+        pos_candidates = Loc_all_unlabeled
+        print(f"  [Step2] Using NodeLocation (lat/lon) for spatial FPS")
+    else:
+        pos_labeled = Map_labeled
+        pos_candidates = Map_all_unlabeled
+        print(f"  [Step2] Using Map coords for spatial FPS")
+
+    valid_indices = np.where(valid_mask)[0]
+
+    # Initialize min_dists: distance from each valid candidate to nearest labeled
+    min_dists = np.full(n_candidates, -np.inf)
+    for i in valid_indices:
+        d = np.sqrt(np.sum((pos_candidates[i:i+1] - pos_labeled)**2, axis=1))
+        min_dists[i] = d.min()
+
+    selected = []
+    selection_dists = []
+
+    for step in range(n_select):
+        # Select valid candidate with maximum min_dist (farthest from all selected)
+        best = -1
+        best_dist = -1.0
+        for i in valid_indices:
+            if i in set(selected):
+                continue
+            if min_dists[i] > best_dist:
+                best_dist = min_dists[i]
+                best = i
+
+        if best == -1:
+            print(f"  [Step2] WARNING: ran out of candidates at step {step}")
+            break
+
+        selected.append(best)
+        selection_dists.append(best_dist)
+
+        # Update min distances: include newly selected point
+        new_dists = np.sqrt(np.sum((pos_candidates - pos_candidates[best:best+1])**2, axis=1))
+        for i in valid_indices:
+            if i not in set(selected):
+                min_dists[i] = min(min_dists[i], new_dists[i])
+
+        # Progress print
+        if (step + 1) % 200 == 0 or step == 0:
+            print(f"  [Step2] Selected {step+1}/{n_select}, last pick dist={best_dist:.6f}")
+
+    selected = np.array(selected)
+    selection_dists = np.array(selection_dists)
+
+    # ========== Debug stats ==========
+    print(f"  [Step2] FPS complete: {len(selected)}/{n_select} stations selected")
+    print(f"  [Step2] Pick-time distance: min={selection_dists.min():.6f}, "
+          f"max={selection_dists.max():.6f}, mean={selection_dists.mean():.6f}")
+
+    # Distance from each selected to nearest labeled
+    dist_to_labeled = []
+    for i in selected:
+        d = np.sqrt(np.sum((pos_candidates[i:i+1] - pos_labeled)**2, axis=1)).min()
+        dist_to_labeled.append(d)
+    dist_to_labeled = np.array(dist_to_labeled)
+    print(f"  [Step2] Selected dist to nearest labeled: min={dist_to_labeled.min():.6f}, "
+          f"max={dist_to_labeled.max():.6f}, mean={dist_to_labeled.mean():.6f}")
+
+    # Max adj_weight to labeled for selected stations
+    print(f"  [Step2] Selected max adj to labeled: min={max_adj_to_labeled[selected].min():.4f}, "
+          f"max={max_adj_to_labeled[selected].max():.4f}, mean={max_adj_to_labeled[selected].mean():.4f}")
+
+    return selected
 
 
 def genGeoFeatures_unlabeled(UrbanFeatureMat, geoMethod='average', poolSize=15,
@@ -129,35 +281,104 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     print("Loading Unlabeled_Finalized.mat...")
     unlabeled = mat73.loadmat(f'{path}/Unlabeled_Finalized.mat')
 
-    # Select unlabeled stations (skip first nNodes_labeled which are labeled)
-    # V2: first 58 usable stations are labeled, rest are unlabeled
-    usable_indices = labeled.get('usable_station_indices', None)
-    if usable_indices is not None:
-        # Unlabeled starts after all 106 V2 labeled stations
-        start_idx = 106
+    # Select unlabeled stations using FPS (skip first 106 which are V2 labeled stations)
+    start_idx = 106  # Skip all 106 V2 labeled stations
+    total_unlabeled_available = 2000 - start_idx  # 1894 candidates
+
+    # Get Map, SM, UF, Loc for FPS selection
+    usable_idx = labeled['usable_station_indices'].squeeze().astype(int) if 'usable_station_indices' in labeled else np.arange(nNodes_labeled)
+    Map_labeled_v2 = unlabeled['Map'][:106][usable_idx]
+    SM_labeled_v2 = unlabeled['SimilarityMat'][:106][usable_idx]
+    Map_all_candidates = unlabeled['Map'][start_idx:]
+    SM_all_candidates = unlabeled['SimilarityMat'][start_idx:]
+
+    # UrbanFeature and NodeLocation for filtering and spatial FPS
+    UF_labeled_raw = unlabeled.get('UrbanFeature', None)
+    UF_all_candidates = None
+    if UF_labeled_raw is not None:
+        UF_labeled_fps = UF_labeled_raw[:106][usable_idx]
+        UF_all_candidates = UF_labeled_raw[start_idx:]
+
+    Loc_labeled_v2 = unlabeled['NodeLocation'][:106][usable_idx]
+    Loc_all_candidates = unlabeled['NodeLocation'][start_idx:]
+
+    n_unlabeled = min(n_unlabeled, total_unlabeled_available)
+
+    # FPS station selection
+    use_fps = int(os.environ.get('USE_FPS', 1))  # default: use FPS
+    if use_fps and n_unlabeled < total_unlabeled_available:
+        print(f"  Selecting {n_unlabeled} from {total_unlabeled_available} candidates using FPS...")
+        fps_indices = select_unlabeled_fps(
+            Map_labeled_v2, SM_labeled_v2,
+            Map_all_candidates, SM_all_candidates,
+            n_unlabeled,
+            UF_labeled=UF_labeled_fps, UF_all_unlabeled=UF_all_candidates,
+            Loc_labeled=Loc_labeled_v2, Loc_all_unlabeled=Loc_all_candidates)
+        # Convert to global indices in the 2000-station array
+        global_indices = start_idx + fps_indices
     else:
-        start_idx = nNodes_labeled
-    end_idx = start_idx + n_unlabeled
+        print(f"  Using all {n_unlabeled} unlabeled stations (no FPS)")
+        fps_indices = np.arange(n_unlabeled)
+        global_indices = np.arange(start_idx, start_idx + n_unlabeled)
+
+    # Visualize FPS selection
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        loc_labeled = labeled['NodeLocation'] if 'NodeLocation' in labeled else None
+        loc_all_u = unlabeled['NodeLocation']
+        loc_not_selected = np.delete(np.arange(start_idx, 2000), fps_indices)
+
+        if loc_labeled is not None:
+            fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+            # All candidates (gray, small)
+            ax.scatter(loc_all_u[loc_not_selected, 1], loc_all_u[loc_not_selected, 0],
+                       c='lightgray', s=8, alpha=0.4, label=f'Not selected ({len(loc_not_selected)})')
+            # FPS selected (orange)
+            ax.scatter(loc_all_u[global_indices, 1], loc_all_u[global_indices, 0],
+                       c='orange', s=20, alpha=0.7, label=f'FPS selected ({n_unlabeled})')
+            # Labeled (red triangles)
+            ax.scatter(loc_labeled[:, 1], loc_labeled[:, 0],
+                       c='red', s=80, marker='^', zorder=5, label=f'Labeled ({nNodes_labeled})')
+            ax.set_xlabel('Longitude')
+            ax.set_ylabel('Latitude')
+            ax.set_title(f'FPS Station Selection: {n_unlabeled} unlabeled from {total_unlabeled_available} candidates')
+            ax.legend(fontsize=9)
+            plt.tight_layout()
+
+            # Save to output_dir (passed via env or use default)
+            fps_fig_dir = os.environ.get('OUTPUT_DIR', '')
+            if not fps_fig_dir:
+                fps_fig_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'log')
+            os.makedirs(fps_fig_dir, exist_ok=True)
+            fps_fig_path = os.path.join(fps_fig_dir, f'fps_selection_{n_unlabeled}u.png')
+            plt.savefig(fps_fig_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"  [FPS] Selection map saved: {fps_fig_path}")
+    except Exception as e:
+        print(f"  [FPS] Visualization skipped: {e}")
 
     # WRF unlabeled (63 dims, no merge)
     WRFMat_u = unlabeled['WRFMat']
     if WRFMat_u.shape[0] != 6624:
         WRFMat_u = np.transpose(WRFMat_u, (2, 1, 0))
-    WRFMat_u = WRFMat_u[:T_2018, :, start_idx:end_idx]  # slice to 2018
+    WRFMat_u = WRFMat_u[:T_2018, :, global_indices]  # FPS selected stations
     cfd_unlabeled = np.transpose(WRFMat_u, (0, 2, 1))  # (T, nU, 63)
 
     # CLMS unlabeled
     CLMSMat_u = unlabeled['CLMSMat']
     if CLMSMat_u.shape[0] != 6624:
         CLMSMat_u = np.transpose(CLMSMat_u, (2, 1, 0))
-    CLMSMat_u = CLMSMat_u[:T_2018, :, start_idx:end_idx]
+    CLMSMat_u = CLMSMat_u[:T_2018, :, global_indices]
     clms_unlabeled = np.transpose(CLMSMat_u, (0, 2, 1))  # (T, nU, 3)
 
     # UrbanFeature unlabeled
     # Cols 0-15: height/fraction (NaN → 0), Col 16: distance to lake (NaN → median)
     UF_unlabeled = unlabeled.get('UrbanFeature', None)
     if UF_unlabeled is not None:
-        UF_unlabeled = UF_unlabeled[start_idx:end_idx, :]
+        UF_unlabeled = UF_unlabeled[global_indices, :]
         n_nan_u = np.isnan(UF_unlabeled).sum()
         if n_nan_u > 0:
             UF_unlabeled[:, :16] = np.nan_to_num(UF_unlabeled[:, :16], nan=0.0)
@@ -177,7 +398,13 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     # GeoEmbed unlabeled (use labeled norm params)
     UFM_u = unlabeled.get('UrbanFeatureMat', None)
     if UFM_u is not None:
-        UFM_u = np.nan_to_num(UFM_u[:, :, :, start_idx:end_idx], nan=0.0)
+        try:
+            UFM_u = np.nan_to_num(UFM_u[:, :, :, global_indices], nan=0.0)
+        except Exception as e:
+            print(f"  [Warning] UrbanFeatureMat failed for {n_unlabeled} stations: {e}")
+            UFM_u = None
+
+    if UFM_u is not None:
         _geoFeatures_unlabeled, _, _, _ = genGeoFeatures_unlabeled(
             UFM_u, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'],
             norm_off=_off, norm_scl=_scl)
@@ -202,52 +429,69 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     # ======================== Build unified graph ========================
     print("Building unified graph (labeled + unlabeled)...")
 
-    # Get Map and SimilarityMat for all nodes from V2 source
-    if 'usable_station_indices' in labeled:
-        usable_idx = labeled['usable_station_indices'].squeeze().astype(int)
-        Map_labeled = unlabeled['Map'][:106][usable_idx]
-        SM_labeled = unlabeled['SimilarityMat'][:106][usable_idx]
-    else:
-        Map_labeled = np.squeeze(labeled['Map'])
-        SM_labeled = np.squeeze(labeled['SimilarityMat'])
+    # Get Map and SimilarityMat for graph construction (using FPS-selected stations)
+    Map_labeled = Map_labeled_v2  # already loaded for FPS
+    SM_labeled = SM_labeled_v2
 
-    Map_unlabeled = unlabeled['Map'][start_idx:end_idx]
-    SM_unlabeled = unlabeled['SimilarityMat'][start_idx:end_idx]
+    Map_unlabeled = unlabeled['Map'][global_indices]
+    SM_unlabeled = unlabeled['SimilarityMat'][global_indices]
 
     nNodes_total = nNodes_labeled + n_unlabeled
 
-    # --- Block-wise graph construction ---
-    # L-L, U-U, L-U computed separately with independent distance normalization
-    # This ensures L-L connectivity matches supervised learning exactly
-    thres_ll = dataParam.get('thres_ll', 0.1)   # same as supervised
-    thres_uu = dataParam.get('thres_uu', 0.4)
-    thres_lu = dataParam.get('thres_lu', 0.4)
-
-    # L-L block (same as supervised graph)
-    Adj_ll = build_adj_matrix(Map_labeled, SM_labeled, thres_ll)
-
-    # U-U block
-    Adj_uu = build_adj_matrix(Map_unlabeled, SM_unlabeled, thres_uu)
-
-    # L-U block (cross edges, independent normalization)
-    Map_cross = np.vstack([Map_labeled, Map_unlabeled])
-    SM_cross = np.vstack([SM_labeled, SM_unlabeled])
-    Adj_cross_full = build_adj_matrix(Map_cross, SM_cross, thres_lu)
-    Adj_lu = Adj_cross_full[:nNodes_labeled, nNodes_labeled:]  # extract L-U block
-
-    # Assemble unified adjacency matrix
-    Adj = np.zeros((nNodes_total, nNodes_total))
-    Adj[:nNodes_labeled, :nNodes_labeled] = Adj_ll
-    Adj[nNodes_labeled:, nNodes_labeled:] = Adj_uu
-    Adj[:nNodes_labeled, nNodes_labeled:] = Adj_lu
-    Adj[nNodes_labeled:, :nNodes_labeled] = Adj_lu.T
+    # --- Unified graph computation (all nodes same distance normalization) ---
+    # Step 3: Build graph with adaptive threshold (target density 30-80%)
+    Map_all = np.vstack([Map_labeled, Map_unlabeled])
+    SM_all = np.vstack([SM_labeled, SM_unlabeled])
+    thres = dataParam['thres']
+    Adj = build_adj_matrix(Map_all, SM_all, thres)
     np.fill_diagonal(Adj, 0)
     assert np.allclose(Adj, Adj.T)
 
-    # # --- Old: unified computation (all nodes same normalization) ---
-    # Map_all = np.vstack([Map_labeled, Map_unlabeled])
-    # SM_all = np.vstack([SM_labeled, SM_unlabeled])
-    # Adj = build_adj_matrix(Map_all, SM_all, dataParam['thres'])
+    # Adaptive threshold: if density > 80%, increase threshold by 0.05 until 30-80%
+    max_possible_edges = nNodes_total * (nNodes_total - 1) / 2
+    current_edges = int(np.sum(Adj > 0) // 2)
+    current_density = current_edges / max_possible_edges * 100
+    original_thres = thres
+
+    while current_density > 80.0 and thres < 0.95:
+        thres += 0.05
+        Adj[Adj < thres] = 0.0
+        Adj = (Adj + Adj.T) / 2  # keep symmetric
+        np.fill_diagonal(Adj, 0)
+        current_edges = int(np.sum(Adj > 0) // 2)
+        current_density = current_edges / max_possible_edges * 100
+        # Stop if density drops below 30%
+        if current_density < 30.0:
+            print(f"  [Step3] Density dropped below 30% at thres={thres:.2f}, reverting to {thres-0.05:.2f}")
+            thres -= 0.05
+            # Rebuild at previous threshold
+            Adj = build_adj_matrix(Map_all, SM_all, thres)
+            np.fill_diagonal(Adj, 0)
+            break
+
+    if thres != original_thres:
+        print(f"  [Step3] Adaptive threshold: {original_thres} -> {thres:.2f} (density: {current_density:.1f}%)")
+    else:
+        print(f"  [Step3] Threshold {thres} OK, density={current_density:.1f}% (within 30-80%)")
+
+    # # --- Old: Block-wise graph construction (separate normalization per block) ---
+    # thres_ll = dataParam.get('thres_ll', dataParam['thres'])
+    # default_thres_uu = 0.4 if n_unlabeled > 500 else 0.4
+    # default_thres_lu = 0.4 if n_unlabeled > 500 else 0.4
+    # thres_uu = dataParam.get('thres_uu', default_thres_uu)
+    # thres_lu = dataParam.get('thres_lu', default_thres_lu)
+    # Adj_ll = build_adj_matrix(Map_labeled, SM_labeled, thres_ll)
+    # Adj_uu = build_adj_matrix(Map_unlabeled, SM_unlabeled, thres_uu)
+    # Map_cross = np.vstack([Map_labeled, Map_unlabeled])
+    # SM_cross = np.vstack([SM_labeled, SM_unlabeled])
+    # Adj_cross_full = build_adj_matrix(Map_cross, SM_cross, thres_lu)
+    # Adj_lu = Adj_cross_full[:nNodes_labeled, nNodes_labeled:]
+    # Adj = np.zeros((nNodes_total, nNodes_total))
+    # Adj[:nNodes_labeled, :nNodes_labeled] = Adj_ll
+    # Adj[nNodes_labeled:, nNodes_labeled:] = Adj_uu
+    # Adj[:nNodes_labeled, nNodes_labeled:] = Adj_lu
+    # Adj[nNodes_labeled:, :nNodes_labeled] = Adj_lu.T
+    # np.fill_diagonal(Adj, 0)
     # assert np.allclose(Adj, Adj.T)
 
     # Edge statistics
@@ -257,7 +501,7 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     total_edges = int(np.sum(Adj > 0) // 2)
     density = total_edges / (nNodes_total * (nNodes_total - 1) / 2) * 100
     print(f"  Graph: {nNodes_total} nodes, {total_edges*2} edges, density={density:.1f}%")
-    print(f"  L-L={n_ll} (thres={thres_ll}), U-U={n_uu} (thres={thres_uu}), L-U={n_lu} (thres={thres_lu})")
+    print(f"  L-L={n_ll}, U-U={n_uu}, L-U={n_lu} (unified thres={thres})")
 
     # ======================== Build PyG dataset ========================
     edgeIdxV, edgeAttrV = pyg_utils.dense_to_sparse(torch.FloatTensor(Adj))

@@ -8,12 +8,15 @@ device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
 project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 conv_type = os.environ.get('CONV_TYPE', 'graphconv').lower()
+n_unlabeled_env = os.environ.get('N_UNLABELED', '200')
+use_fps = int(os.environ.get('USE_FPS', 1))
+fps_tag = '_fps' if use_fps else ''
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 job_id = os.environ.get('SLURM_JOB_ID', '')
 if job_id:
-    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}_{timestamp}_job{job_id}')
+    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}{fps_tag}_{n_unlabeled_env}u_{timestamp}_job{job_id}')
 else:
-    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}_{timestamp}')
+    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}{fps_tag}_{n_unlabeled_env}u_{timestamp}')
 os.makedirs(output_dir, exist_ok=True)
 
 def main():
@@ -23,11 +26,12 @@ def main():
             'nCompPCA': 40,
             'window' : 2,
             'poolSize': 12,
-            'batchSize': 128,  # 降低batch_size避免OOM
-            'thres':    0.1,
+            'batchSize': int(os.environ.get('BATCH_SIZE', 128)),
+            'thres':    float(os.environ.get('THRES', 0.1)),
             'geoFeatures':  'full',
             }
-    n_unlabeled = 200  # 无标签站点数
+    n_unlabeled = int(os.environ.get('N_UNLABELED', 200))  # 无标签站点数
+    os.environ['OUTPUT_DIR'] = output_dir  # pass to data_semi for FPS visualization
     trainLoader, validLoader, metadata, _ = data_semi.dataGen(dataParam, path, n_unlabeled=n_unlabeled)
     
     # ========== 半监督学习数据检查 ==========
