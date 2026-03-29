@@ -10,7 +10,7 @@ Key idea: Learn per-sample uncertainty weights for pseudo-labels via bi-level op
 import numpy as np
 import torch, torch.nn as nn, torch.nn.functional as F
 import pickle, copy, data_semi, network_semi, utils
-import os, wandb
+import os, higher, wandb
 from datetime import datetime
 from torch_geometric.nn import GraphConv, SAGEConv, APPNP
 torch_geometric_nn_types = (GraphConv, SAGEConv, APPNP)
@@ -209,10 +209,11 @@ def main():
             y_labeled = _batch.y[label_mask]
             loss_labeled = lossFn(pred_strong_labeled, y_labeled)
 
-            # --- Uncertainty weights ---
-            pred_diff = pred_strong_ulb.detach() - pred_weak_ulb
-            unc_input = torch.cat([pred_diff, pred_strong_ulb.detach()], dim=-1)  # (nU, 2)
-            unc_weight = unc_learner(unc_input.detach())
+            # --- Uncertainty weights (no grad, following official code) ---
+            with torch.no_grad():
+                pred_diff = pred_strong_ulb.detach() - pred_weak_ulb
+                unc_input = torch.cat([pred_diff, pred_strong_ulb.detach()], dim=-1)  # (nU, 2)
+                unc_weight = unc_learner(unc_input)
             weight_new = torch.exp(-unc_weight) / 2  # (nU, 1), range (0, 0.5)
 
             # --- Weighted unlabeled loss ---
@@ -222,68 +223,100 @@ def main():
             # --- Total loss ---
             total_loss = loss_labeled + w_ulb * loss_unlabeled
 
-            # --- Bi-level optimization (every bilevel_freq iterations) ---
-            # Approximate bi-level: UncertaintyLearner learns to minimize labeled loss
-            # by adjusting weights on unlabeled pseudo-labels.
-            # Key: unc_learner output directly participates in labeled loss computation
-            # via weighted pseudo-label influence on model predictions.
+            # --- Bi-level optimization FIRST (every bilevel_freq iterations) ---
+            # Following official code: bi-level runs inside higher context,
+            # then standard update runs outside (no conflict).
             if train_iter % bilevel_freq == 0:
-                # Step A: Compute uncertainty-weighted pseudo loss WITH gradient through unc_learner
-                x_unc = apply_augmentation(_batch.x, weak_noise)
-                pred_unc_all = model(x_unc, _batch.edge_index, _batch.edge_attr)
-                pred_unc_labeled = pred_unc_all[label_mask]
-                pred_unc_ulb = pred_unc_all[unlabel_mask]
+                with higher.innerloop_ctx(model.decoder, optim_decoder) as (fmodel_dec, diff_opt):
+                    # Inner forward: encoder + processor (not in higher), functional decoder
+                    feat_inner = _batch.x.clone()
+                    for _f in model.encoder:
+                        feat_inner = _f(feat_inner)
+                    for _f in model.processor:
+                        if isinstance(_f, torch_geometric_nn_types):
+                            feat_inner = _f(feat_inner, _batch.edge_index, _batch.edge_attr)
+                        else:
+                            feat_inner = _f(feat_inner)
 
-                with torch.no_grad():
-                    x_weak_unc = apply_augmentation(_batch.x, weak_noise)
-                    pred_weak_unc = model(x_weak_unc, _batch.edge_index, _batch.edge_attr)
-                    pred_weak_ulb_unc = pred_weak_unc[unlabel_mask]
+                    # Labeled prediction via functional decoder
+                    pred_inner = feat_inner
+                    for _f in fmodel_dec:
+                        pred_inner = _f(pred_inner)
+                    inner_labeled_loss = F.mse_loss(pred_inner[label_mask], y_labeled)
 
-                unc_diff = pred_unc_ulb.detach() - pred_weak_ulb_unc
-                unc_input_bl = torch.cat([unc_diff, pred_unc_ulb.detach()], dim=-1)
-                unc_weight_bl = unc_learner(unc_input_bl)  # gradient flows through unc_learner
-                weight_bl = torch.exp(-unc_weight_bl) / 2
+                    # Weak augmentation pseudo-labels (no grad)
+                    with torch.no_grad():
+                        x_weak_bl = apply_augmentation(_batch.x, weak_noise)
+                        feat_weak = x_weak_bl
+                        for _f in model.encoder:
+                            feat_weak = _f(feat_weak)
+                        for _f in model.processor:
+                            if isinstance(_f, torch_geometric_nn_types):
+                                feat_weak = _f(feat_weak, _batch.edge_index, _batch.edge_attr)
+                            else:
+                                feat_weak = _f(feat_weak)
+                        pred_weak_bl = feat_weak
+                        for _f in fmodel_dec:
+                            pred_weak_bl = _f(pred_weak_bl)
 
-                # Step B: UncertaintyLearner loss = labeled loss + penalty for extreme weights
-                # The unc_learner should assign weights that help labeled predictions
-                # We use labeled loss as the signal, plus a regularization:
-                #   - If weights are all zero → no unlabeled help → bad
-                #   - If weights are all high → noisy pseudo-labels hurt → bad
-                # Labeled loss (no unc_learner gradient here, just as target signal)
-                unc_labeled_loss = F.mse_loss(pred_unc_labeled.detach(), y_labeled)
+                    # Strong augmentation predictions
+                    x_strong_bl = apply_augmentation(_batch.x, strong_noise)
+                    feat_strong = x_strong_bl
+                    for _f in model.encoder:
+                        feat_strong = _f(feat_strong)
+                    for _f in model.processor:
+                        if isinstance(_f, torch_geometric_nn_types):
+                            feat_strong = _f(feat_strong, _batch.edge_index, _batch.edge_attr)
+                        else:
+                            feat_strong = _f(feat_strong)
+                    pred_strong_bl = feat_strong
+                    for _f in fmodel_dec:
+                        pred_strong_bl = _f(pred_strong_bl)
 
-                # Pseudo-label loss weighted by unc_learner (gradient flows through weight_bl)
-                pseudo_mse_bl = (pred_unc_ulb.detach() - pred_weak_ulb_unc) ** 2
-                weighted_pseudo_loss = torch.mean(weight_bl * pseudo_mse_bl)
+                    pred_strong_ulb = pred_strong_bl[unlabel_mask]
+                    pred_weak_ulb = pred_weak_bl[unlabel_mask]
 
-                # UncertaintyLearner objective:
-                # Minimize: weighted pseudo loss (learn to downweight bad pseudo-labels)
-                # + entropy regularization (prevent collapsing to all-zero or all-one weights)
-                weight_entropy = -torch.mean(weight_bl * torch.log(weight_bl + 1e-8) +
-                                             (0.5 - weight_bl) * torch.log(0.5 - weight_bl + 1e-8))
-                unc_total_loss = weighted_pseudo_loss + 0.1 * weight_entropy
+                    # Uncertainty weights (gradient through unc_learner)
+                    unc_input_bl = torch.cat([pred_strong_ulb.detach() - pred_weak_ulb.detach(),
+                                             pred_strong_ulb.detach()], dim=-1)
+                    unc_weight_bl = unc_learner(unc_input_bl)
+                    weight_bl = torch.exp(-unc_weight_bl) / 2
 
-                optim_unc.zero_grad()
-                unc_total_loss.backward()
+                    # Inner unlabeled loss
+                    unlabel_mse_bl = (pred_strong_ulb - pred_weak_ulb.detach()) ** 2
+                    inner_ulb_loss = torch.mean(weight_bl * unlabel_mse_bl)
 
-                # Debug: check if unc_learner actually got gradients
-                unc_grad_norm = 0.0
-                for p in unc_learner.parameters():
-                    if p.grad is not None:
-                        unc_grad_norm += p.grad.norm().item() ** 2
-                unc_grad_norm = unc_grad_norm ** 0.5
+                    inner_loss = inner_labeled_loss + w_ulb * inner_ulb_loss
+                    diff_opt.step(inner_loss)  # differentiable decoder update
 
-                optim_unc.step()
+                    # Outer: evaluate updated decoder on labeled (meta-update unc_learner)
+                    pred_outer = feat_inner.detach()
+                    for _f in fmodel_dec:
+                        pred_outer = _f(pred_outer)
+                    outer_loss = F.mse_loss(pred_outer[label_mask], y_labeled)
 
-                # Debug print (first epoch and every 100 epochs)
-                if epoch % 100 == 0 and _n == 0:
-                    with open(f'{output_dir}/{modelName}_log', 'a') as f:
-                        print(f"  [Bi-level] unc_grad_norm={unc_grad_norm:.6f}, "
-                              f"unc_loss={unc_total_loss.item():.6f}, "
-                              f"weighted_pseudo={weighted_pseudo_loss.item():.6f}, "
-                              f"entropy={weight_entropy.item():.6f}", file=f)
+                    optim_unc.zero_grad()
+                    outer_loss.backward()
+
+                    # Debug
+                    unc_grad_norm = 0.0
+                    for p in unc_learner.parameters():
+                        if p.grad is not None:
+                            unc_grad_norm += p.grad.norm().item() ** 2
+                    unc_grad_norm = unc_grad_norm ** 0.5
+
+                    optim_unc.step()
+
+                    if epoch % 100 == 0 and _n == 0:
+                        with open(f'{output_dir}/{modelName}_log', 'a') as f:
+                            print(f"  [Bi-level] unc_grad_norm={unc_grad_norm:.6f}, "
+                                  f"outer_loss={outer_loss.item():.6f}, "
+                                  f"inner_loss={inner_loss.item():.6f}, "
+                                  f"weight_mean={weight_bl.mean().item():.4f}", file=f)
 
             # --- Standard update (backbone + decoder) ---
+            # unc_learner weights computed with no_grad (following official code)
+            model.zero_grad()
             optim_backbone.zero_grad()
             optim_decoder.zero_grad()
             total_loss.backward()
