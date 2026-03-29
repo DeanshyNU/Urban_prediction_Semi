@@ -105,6 +105,13 @@ def main():
         'conv_type': conv_type,
     }
     model = network_semi.GNN(modelParam).to(device)
+
+    # Wrap decoder as nn.Sequential for higher library compatibility
+    # (higher has issues with ModuleList, works with Sequential)
+    # Replace model.decoder with Sequential version so model.forward() also uses it
+    model.decoder = nn.Sequential(*list(model.decoder))
+    model.decoder.to(device)
+
     unc_learner = UncertaintyLearner(input_dim=2, output_dim=1, hidden_dim=128, num_layers=1).to(device)
 
     # Separate optimizers (following official code)
@@ -238,10 +245,8 @@ def main():
                         else:
                             feat_inner = _f(feat_inner)
 
-                    # Labeled prediction via functional decoder
-                    pred_inner = feat_inner
-                    for _f in fmodel_dec:
-                        pred_inner = _f(pred_inner)
+                    # Labeled prediction via functional decoder (Sequential, call directly)
+                    pred_inner = fmodel_dec(feat_inner)
                     inner_labeled_loss = F.mse_loss(pred_inner[label_mask], y_labeled)
 
                     # Weak augmentation pseudo-labels (no grad)
@@ -255,9 +260,7 @@ def main():
                                 feat_weak = _f(feat_weak, _batch.edge_index, _batch.edge_attr)
                             else:
                                 feat_weak = _f(feat_weak)
-                        pred_weak_bl = feat_weak
-                        for _f in fmodel_dec:
-                            pred_weak_bl = _f(pred_weak_bl)
+                        pred_weak_bl = fmodel_dec(feat_weak)
 
                     # Strong augmentation predictions
                     x_strong_bl = apply_augmentation(_batch.x, strong_noise)
@@ -269,9 +272,7 @@ def main():
                             feat_strong = _f(feat_strong, _batch.edge_index, _batch.edge_attr)
                         else:
                             feat_strong = _f(feat_strong)
-                    pred_strong_bl = feat_strong
-                    for _f in fmodel_dec:
-                        pred_strong_bl = _f(pred_strong_bl)
+                    pred_strong_bl = fmodel_dec(feat_strong)
 
                     pred_strong_ulb = pred_strong_bl[unlabel_mask]
                     pred_weak_ulb = pred_weak_bl[unlabel_mask]
@@ -290,9 +291,7 @@ def main():
                     diff_opt.step(inner_loss)  # differentiable decoder update
 
                     # Outer: evaluate updated decoder on labeled (meta-update unc_learner)
-                    pred_outer = feat_inner.detach()
-                    for _f in fmodel_dec:
-                        pred_outer = _f(pred_outer)
+                    pred_outer = fmodel_dec(feat_inner.detach())
                     outer_loss = F.mse_loss(pred_outer[label_mask], y_labeled)
 
                     optim_unc.zero_grad()
