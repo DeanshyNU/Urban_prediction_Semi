@@ -65,7 +65,7 @@ def main():
     )
     
     model = (network.GNN(modelParam)).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt,gamma=0.9992)
 
     # Early stopping

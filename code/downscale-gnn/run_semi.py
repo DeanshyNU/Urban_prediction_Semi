@@ -9,8 +9,8 @@ path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
 project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
 conv_type = os.environ.get('CONV_TYPE', 'graphconv').lower()
 n_unlabeled_env = os.environ.get('N_UNLABELED', '200')
-use_fps = int(os.environ.get('USE_FPS', 1))
-fps_tag = '_fps' if use_fps else ''
+use_fps = int(os.environ.get('USE_FPS', 0))
+fps_tag = '_fps_score' if use_fps == 2 else ('_fps' if use_fps == 1 else '')
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 job_id = os.environ.get('SLURM_JOB_ID', '')
 if job_id:
@@ -141,12 +141,13 @@ def main():
     )
     
     model = (network_semi.GNN(modelParam)).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt,gamma=0.9992)
 
     # Early stopping
-    early_stop_patience = 300  # epochs without improvement
-    early_stop_counter = 0
+    # early stopping disabled
+    # early_stop_patience = 300
+    # early_stop_counter = 0
     lossFn = torch.nn.HuberLoss().to(device)
     # Load checkpoint or initialize training
     EPOCH,bestLoss,chkptPath,hist = network_semi.loadCheckPoint(modelName,model,opt,device,load=False,output_dir=output_dir)
@@ -176,11 +177,11 @@ def main():
         print(f"  训练轮数: {nEpoch}", file=f)
         print(f"  学习率: 1e-3", file=f)
         print(f"  学习率衰减: 0.9992", file=f)
-        print(f"  优化器: Adam (weight_decay=1e-4)", file=f)
+        print(f"  优化器: Adam (no weight_decay)", file=f)
         print(f"  损失函数: HuberLoss", file=f)
         print(f"  地理嵌入: 无标签数据使用有标签归一化参数后 clip 到 [0,1]", file=f)
         print(f"  梯度裁剪: max_norm=1.0", file=f)
-        print(f"  Early stopping: patience={early_stop_patience} epochs", file=f)
+        print(f"  Early stopping: disabled", file=f)
         print(f"  Weight decay: 1e-4", file=f)
         print("", file=f)
         print("数据集信息:", file=f)
@@ -239,7 +240,6 @@ def main():
         # Save best model
         if validRMSE[0]<bestLoss:
             bestLoss = validRMSE[0]
-            early_stop_counter = 0  # reset counter
             with open(f'{output_dir}/{modelName}_log','a') as f: print("Model saved.",file=f)
             wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
             torch.save({
@@ -249,13 +249,6 @@ def main():
                 'bestLoss':         bestLoss,
                 'hist':             hist,
                 }, chkptPath)
-        else:
-            early_stop_counter += 1
-            if early_stop_counter >= early_stop_patience:
-                with open(f'{output_dir}/{modelName}_log','a') as f:
-                    print(f"\nEarly stopping at epoch {epoch}: no improvement for {early_stop_patience} epochs. Best valid RMSE: {bestLoss:.6f}", file=f)
-                print(f"Early stopping at epoch {epoch}. Best valid RMSE: {bestLoss:.6f}")
-                break
         # Plot training history
         hist.append([trainLoss,validLoss,trainRMSE[0],validRMSE[0]])
         utils.plotHist(hist,modelName,output_dir=output_dir)

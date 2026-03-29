@@ -17,7 +17,8 @@ from data import genGeoFeatures_v2, build_adj_matrix
 
 def select_unlabeled_fps(Map_labeled, SM_labeled, Map_all_unlabeled, SM_all_unlabeled, n_select,
                          UF_labeled=None, UF_all_unlabeled=None,
-                         Loc_labeled=None, Loc_all_unlabeled=None):
+                         Loc_labeled=None, Loc_all_unlabeled=None,
+                         use_score=False):
     """
     Three-step unlabeled station selection:
       Step 1: Filter - remove unreachable (adj=0) and feature-outlier (top 5%) candidates
@@ -92,16 +93,31 @@ def select_unlabeled_fps(Map_labeled, SM_labeled, Map_all_unlabeled, SM_all_unla
         print(f"  [Step1] WARNING: requested {n_select} > valid {n_valid}, using all valid")
         return np.where(valid_mask)[0]
 
-    # ========== Step 2: Pure spatial FPS ==========
+    # ========== Step 2: FPS (spatial or score-weighted) ==========
     # Use NodeLocation (lat/lon) if available for true spatial distance
     if Loc_labeled is not None and Loc_all_unlabeled is not None:
         pos_labeled = Loc_labeled
         pos_candidates = Loc_all_unlabeled
-        print(f"  [Step2] Using NodeLocation (lat/lon) for spatial FPS")
+        print(f"  [Step2] Using NodeLocation (lat/lon) for spatial distance")
     else:
         pos_labeled = Map_labeled
         pos_candidates = Map_all_unlabeled
-        print(f"  [Step2] Using Map coords for spatial FPS")
+        print(f"  [Step2] Using Map coords for spatial distance")
+
+    if use_score:
+        # Normalize scores for valid candidates to [0, 1]
+        valid_scores = max_adj_to_labeled.copy()
+        valid_scores[~valid_mask] = 0
+        if valid_scores.max() > valid_scores.min():
+            scores_norm = (valid_scores - valid_scores[valid_mask].min()) / (valid_scores[valid_mask].max() - valid_scores[valid_mask].min())
+        else:
+            scores_norm = np.ones(n_candidates)
+        scores_norm[~valid_mask] = 0
+        print(f"  [Step2] Mode: SCORE-WEIGHTED FPS (score × diversity)")
+        print(f"  [Step2] Score stats (valid): min={valid_scores[valid_mask].min():.4f}, "
+              f"max={valid_scores[valid_mask].max():.4f}, mean={valid_scores[valid_mask].mean():.4f}")
+    else:
+        print(f"  [Step2] Mode: PURE SPATIAL FPS (diversity only)")
 
     valid_indices = np.where(valid_mask)[0]
 
@@ -115,19 +131,29 @@ def select_unlabeled_fps(Map_labeled, SM_labeled, Map_all_unlabeled, SM_all_unla
     selection_dists = []
 
     for step in range(n_select):
-        # Select valid candidate with maximum min_dist (farthest from all selected)
-        best = -1
-        best_dist = -1.0
-        for i in valid_indices:
-            if i in set(selected):
-                continue
-            if min_dists[i] > best_dist:
-                best_dist = min_dists[i]
-                best = i
-
-        if best == -1:
+        # Normalize current distances for valid unselected candidates
+        unselected_valid = [i for i in valid_indices if i not in set(selected)]
+        if len(unselected_valid) == 0:
             print(f"  [Step2] WARNING: ran out of candidates at step {step}")
             break
+
+        dists_arr = np.array([min_dists[i] for i in unselected_valid])
+        if dists_arr.max() > 0:
+            dists_norm = dists_arr / dists_arr.max()
+        else:
+            dists_norm = np.ones(len(unselected_valid))
+
+        if use_score:
+            # Combined: score × diversity
+            scores_arr = np.array([scores_norm[i] for i in unselected_valid])
+            combined = scores_arr * dists_norm
+        else:
+            # Pure spatial: only diversity
+            combined = dists_norm
+
+        best_local = np.argmax(combined)
+        best = unselected_valid[best_local]
+        best_dist = min_dists[best]
 
         selected.append(best)
         selection_dists.append(best_dist)
@@ -162,6 +188,11 @@ def select_unlabeled_fps(Map_labeled, SM_labeled, Map_all_unlabeled, SM_all_unla
     # Max adj_weight to labeled for selected stations
     print(f"  [Step2] Selected max adj to labeled: min={max_adj_to_labeled[selected].min():.4f}, "
           f"max={max_adj_to_labeled[selected].max():.4f}, mean={max_adj_to_labeled[selected].mean():.4f}")
+
+    # Print selected indices for reproducibility and comparison
+    print(f"  [Step2] Selected indices (first 20): {selected[:20].tolist()}")
+    if len(selected) > 20:
+        print(f"  [Step2] Selected indices (last 20): {selected[-20:].tolist()}")
 
     return selected
 
@@ -305,15 +336,18 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     n_unlabeled = min(n_unlabeled, total_unlabeled_available)
 
     # FPS station selection
-    use_fps = int(os.environ.get('USE_FPS', 1))  # default: use FPS
+    # USE_FPS=0: fixed slice, USE_FPS=1: pure spatial FPS, USE_FPS=2: score-weighted FPS
+    use_fps = int(os.environ.get('USE_FPS', 0))
     if use_fps and n_unlabeled < total_unlabeled_available:
-        print(f"  Selecting {n_unlabeled} from {total_unlabeled_available} candidates using FPS...")
+        fps_mode = "score-weighted" if use_fps == 2 else "pure spatial"
+        print(f"  Selecting {n_unlabeled} from {total_unlabeled_available} candidates using FPS ({fps_mode})...")
         fps_indices = select_unlabeled_fps(
             Map_labeled_v2, SM_labeled_v2,
             Map_all_candidates, SM_all_candidates,
             n_unlabeled,
             UF_labeled=UF_labeled_fps, UF_all_unlabeled=UF_all_candidates,
-            Loc_labeled=Loc_labeled_v2, Loc_all_unlabeled=Loc_all_candidates)
+            Loc_labeled=Loc_labeled_v2, Loc_all_unlabeled=Loc_all_candidates,
+            use_score=(use_fps == 2))
         # Convert to global indices in the 2000-station array
         global_indices = start_idx + fps_indices
     else:
