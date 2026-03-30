@@ -123,10 +123,118 @@ def graph_calibrate_pseudo_labels(pseudo_labels, labeled_targets, neighbor_info,
 
 
 def apply_feature_noise(x, noise_std):
-    """Apply Gaussian noise to features (augmentation for tabular/GNN data)."""
+    """DEPRECATED: kept for reference. Use structured augmentation below."""
     if noise_std > 0:
         return x + torch.randn_like(x) * noise_std
     return x
+
+
+# ==================== Structured Data Augmentation ====================
+# Feature layout (1343 dims total, window=2):
+#   WRF block: 315 dims = 5 time steps x 63 dims/step
+#     Time step order: [current(63), hist[-2](63), hist[-1](63), fut[+1](63), fut[+2](63)]
+#     Within each 63-dim step: 7 variables x 9 grid points
+#       Tair(0-8), Tskin(9-17), Tsoil(18-26), Humid(27-35), Irrad(36-44), WindX(45-53), WindY(54-62)
+#   CLMS: 3 dims (dynamic)
+#   UrbanFeature: 17 dims (static)
+#   GeoEmbed: remaining dims (static)
+import random as _random
+
+WRF_VAR_GROUPS = {
+    'Tair': (0, 9), 'Tskin': (9, 18), 'Tsoil': (18, 27),
+    'Humid': (27, 36), 'Irrad': (36, 45), 'WindX': (45, 54), 'WindY': (54, 63),
+}
+WRF_STEP_DIM = 63
+WRF_WINDOW = 2
+WRF_TOTAL_STEPS = 2 * WRF_WINDOW + 1  # 5
+WRF_TOTAL_DIM = WRF_STEP_DIM * WRF_TOTAL_STEPS  # 315
+CLMS_DIM = 3
+URBAN_DIM = 17
+
+
+def _get_feature_layout(total_dim):
+    geo_dim = total_dim - WRF_TOTAL_DIM - CLMS_DIM - URBAN_DIM
+    return {
+        'wrf': (0, WRF_TOTAL_DIM),
+        'clms': (WRF_TOTAL_DIM, WRF_TOTAL_DIM + CLMS_DIM),
+        'urban': (WRF_TOTAL_DIM + CLMS_DIM, WRF_TOTAL_DIM + CLMS_DIM + URBAN_DIM),
+        'geo': (WRF_TOTAL_DIM + CLMS_DIM + URBAN_DIM, total_dim),
+        'geo_dim': geo_dim,
+    }
+
+
+def _build_wrf_var_indices(var_names):
+    offsets = [i * WRF_STEP_DIM for i in range(WRF_TOTAL_STEPS)]
+    indices = []
+    for step_offset in offsets:
+        for var in var_names:
+            start, end = WRF_VAR_GROUPS[var]
+            indices.extend(range(step_offset + start, step_offset + end))
+    return indices
+
+
+def _build_wrf_timestep_indices(step_idx):
+    offset = step_idx * WRF_STEP_DIM
+    return list(range(offset, offset + WRF_STEP_DIM))
+
+
+def _drop_edges(edge_index, edge_attr, drop_rate):
+    if drop_rate <= 0 or edge_index.size(1) == 0:
+        return edge_index, edge_attr
+    num_edges = edge_index.size(1)
+    keep_mask = torch.rand(num_edges, device=edge_index.device) > drop_rate
+    if keep_mask.sum() < num_edges * 0.5:
+        keep_mask = torch.rand(num_edges, device=edge_index.device) > 0.5
+    return edge_index[:, keep_mask], (edge_attr[keep_mask] if edge_attr is not None else None)
+
+
+def structured_augment_weak(x, edge_index, edge_attr):
+    """Weak augmentation: keep Tair+Tskin, mask 1 low group, mask 10% GeoEmbed."""
+    total_dim = x.size(1)
+    layout = _get_feature_layout(total_dim)
+    x_aug = x.clone()
+
+    low_choices = ['WindX', 'WindY', 'CLMS']
+    chosen = _random.choice(low_choices)
+    if chosen == 'CLMS':
+        s, e = layout['clms']
+        x_aug[:, s:e] = 0.0
+    else:
+        x_aug[:, _build_wrf_var_indices([chosen])] = 0.0
+
+    geo_start, geo_end = layout['geo']
+    geo_mask = torch.rand(layout['geo_dim'], device=x.device) > 0.10
+    x_aug[:, geo_start:geo_end] *= geo_mask.float().unsqueeze(0)
+
+    return x_aug, edge_index, edge_attr
+
+
+def structured_augment_strong(x, edge_index, edge_attr):
+    """Strong augmentation: keep Tair only, mask 2-3 med/low groups, mask 1 time step,
+    mask 30% GeoEmbed, drop 25% edges."""
+    total_dim = x.size(1)
+    layout = _get_feature_layout(total_dim)
+    x_aug = x.clone()
+
+    candidates = ['Humid', 'Irrad', 'WindX', 'WindY', 'CLMS']
+    n_mask = _random.choice([2, 3])
+    chosen_groups = _random.sample(candidates, min(n_mask, len(candidates)))
+    wrf_vars = [v for v in chosen_groups if v != 'CLMS']
+    if wrf_vars:
+        x_aug[:, _build_wrf_var_indices(wrf_vars)] = 0.0
+    if 'CLMS' in chosen_groups:
+        s, e = layout['clms']
+        x_aug[:, s:e] = 0.0
+
+    step_to_mask = _random.choice([1, 2, 3, 4])
+    x_aug[:, _build_wrf_timestep_indices(step_to_mask)] = 0.0
+
+    geo_start, geo_end = layout['geo']
+    geo_mask = torch.rand(layout['geo_dim'], device=x.device) > 0.30
+    x_aug[:, geo_start:geo_end] *= geo_mask.float().unsqueeze(0)
+
+    edge_index_aug, edge_attr_aug = _drop_edges(edge_index, edge_attr, drop_rate=0.25)
+    return x_aug, edge_index_aug, edge_attr_aug
 
 
 def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
@@ -152,6 +260,7 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
     total_filtered = 0
     total_unlabeled_samples = 0
     all_uncertainties = []
+    all_pred_diffs = []
     threshold_val = None
 
     for _n, _batch in enumerate(loader):
@@ -162,9 +271,10 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
         # ==================== Step 1: MC Dropout on weak augmentation ====================
         mc_preds = []
         for mc_i in range(mc_iters):
-            x_weak = apply_feature_noise(_batch.x, weak_noise)
+            x_weak, ei_weak, ea_weak = structured_augment_weak(
+                _batch.x, _batch.edge_index, _batch.edge_attr)
             with torch.no_grad():
-                _yHat_mc = model(x_weak, _batch.edge_index, _batch.edge_attr)
+                _yHat_mc = model(x_weak, ei_weak, ea_weak)
             unlabeled_pred = _yHat_mc[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
             mc_preds.append(unlabeled_pred)
 
@@ -200,15 +310,17 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
 
         # ==================== Step 4: Strong augmentation → loss ====================
         # Labeled loss (with weak augmentation, standard supervised)
-        x_weak_labeled = apply_feature_noise(_batch.x, weak_noise)
-        _yHat_labeled_full = model(x_weak_labeled, _batch.edge_index, _batch.edge_attr)
+        x_weak_labeled, ei_weak_l, ea_weak_l = structured_augment_weak(
+            _batch.x, _batch.edge_index, _batch.edge_attr)
+        _yHat_labeled_full = model(x_weak_labeled, ei_weak_l, ea_weak_l)
         _yHat_labeled = _yHat_labeled_full[label_mask]
         _y_labeled = _batch.y[label_mask]
         labeled_loss = lossFn(_yHat_labeled, _y_labeled)
 
         # Unlabeled loss (with strong augmentation)
-        x_strong = apply_feature_noise(_batch.x, strong_noise)
-        _yHat_strong_full = model(x_strong, _batch.edge_index, _batch.edge_attr)
+        x_strong, ei_strong, ea_strong = structured_augment_strong(
+            _batch.x, _batch.edge_index, _batch.edge_attr)
+        _yHat_strong_full = model(x_strong, ei_strong, ea_strong)
         _yHat_unlabeled = _yHat_strong_full[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
 
         # Masked MSE loss (only on filtered pseudo-labels)
@@ -231,6 +343,11 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
         _LABELED_LOSS += labeled_loss.item()
         _UNLABELED_LOSS += unlabeled_loss.item()
 
+        # Track strong-weak prediction difference (key metric for augmentation effectiveness)
+        with torch.no_grad():
+            pred_diff_sw = (_yHat_unlabeled - pseudo_labels).abs().mean().item()
+            all_pred_diffs.append(pred_diff_sw)
+
         # Record labeled predictions for RMSE
         _pred = _yHat_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
         _truth = _y_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
@@ -244,6 +361,7 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
 
     filter_rate = total_filtered / total_unlabeled_samples * 100 if total_unlabeled_samples > 0 else 0
     all_uncertainties = np.array(all_uncertainties)
+    all_pred_diffs = np.array(all_pred_diffs) if all_pred_diffs else np.array([0.0])
 
     train_stats = {
         'labeled_loss': _LABELED_LOSS / n_batches,
@@ -254,6 +372,7 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
         'uncertainty_median': np.median(all_uncertainties),
         'uncertainty_max': all_uncertainties.max(),
         'pseudo_labels_used_pct': 100 - filter_rate,
+        'pred_diff_strong_weak': all_pred_diffs.mean(),
     }
 
     return (_LOSS / n_batches), _RMSE, truth, pred, train_stats
@@ -266,11 +385,12 @@ def main():
         'nCompPCA': 40,
         'window': 2,
         'poolSize': int(os.environ.get('POOL_SIZE', '12')),
-        'batchSize': 128,
+        'batchSize': int(os.environ.get('BATCH_SIZE', 128)),
         'thres': 0.1,
         'geoFeatures': 'full',
     }
-    n_unlabeled = 200
+    n_unlabeled = int(os.environ.get('N_UNLABELED', 200))
+    os.environ['OUTPUT_DIR'] = output_dir
     trainLoader, validLoader, metadata, _ = data_semi.dataGen(dataParam, path, n_unlabeled=n_unlabeled)
 
     nNodes = metadata['nNodes']
@@ -286,7 +406,7 @@ def main():
     print(f"Unlabeled nodes with labeled neighbors: {n_with_labeled_nbs}/{nNodes_unlabeled}")
     print(f"SimRegMatch config: MC_ITERS={MC_ITERS}, PERCENTILE={PERCENTILE}, "
           f"BETA={BETA}, LAMBDA_U={LAMBDA_U}")
-    print(f"Augmentation: weak_noise={WEAK_NOISE}, strong_noise={STRONG_NOISE}")
+    print(f"Augmentation: structured (weak=Tair+Tskin kept, mask 1 low; strong=Tair kept, mask 2-3 groups+timestep+edges)")
 
     # ==================== Model ====================
     nEpoch = 5000
@@ -346,7 +466,8 @@ def main():
         print(f"  Uncertainty filter percentile: {PERCENTILE} (top {100-PERCENTILE:.0f}% filtered)", file=f)
         print(f"  Calibration beta: {BETA} ({BETA*100:.0f}% model + {(1-BETA)*100:.0f}% graph reference)", file=f)
         print(f"  Lambda_U: {LAMBDA_U} (unlabeled loss weight)", file=f)
-        print(f"  Weak noise: {WEAK_NOISE}, Strong noise: {STRONG_NOISE}", file=f)
+        print(f"  Augmentation: structured (weak=keep Tair+Tskin/mask 1 low/10%geo; "
+              f"strong=keep Tair/mask 2-3 groups/1 timestep/30%geo/25%edges)", file=f)
         print(f"  Ramp-up: {RAMP_EPOCHS} epochs", file=f)
         print(f"  Conv type: {conv_type}", file=f)
         print(f"  Nodes: {nNodes} (labeled={nNodes_labeled}, unlabeled={nNodes_unlabeled})", file=f)
@@ -416,6 +537,7 @@ def main():
             print(f"  uncertainty: mean={train_stats['uncertainty_mean']:.6f}, "
                   f"median={train_stats['uncertainty_median']:.6f}, "
                   f"max={train_stats['uncertainty_max']:.6f}", file=f)
+            print(f"  [AUG] pred_diff(strong-weak): {train_stats['pred_diff_strong_weak']:.6f}", file=f)
             print(f"  RMSE std: {trainRMSE[1]:.3f}/{validRMSE[1]:.3f}; "
                   f"min: {trainRMSE[2]:.3f}/{validRMSE[2]:.3f}; "
                   f"max: {trainRMSE[3]:.3f}/{validRMSE[3]:.3f};", file=f)

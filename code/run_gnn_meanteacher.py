@@ -176,7 +176,7 @@ def main():
         print(f"  输出目录: {output_dir}", file=f)
         print("  方法: Mean Teacher（教师-学生架构）", file=f)
         print("  数据增强: weak_n=2, weak_m=1.5（UrbanFeature不增强）", file=f)
-        print("  GNN增强: noise_std=0.15, edge_drop=15%, feat_mask=15%", file=f)
+        print("  GNN增强: structured_augment_mt (keep Tair, mask 2 med/low groups, 1 timestep, 20% geo, 20% edges)", file=f)
         print("  一致性损失: MSELoss (on ALL nodes)", file=f)
         print("  优化: lr=1e-3, 学习率衰减=0.9995", file=f)
         print("  梯度裁剪: max_norm=1.0", file=f)

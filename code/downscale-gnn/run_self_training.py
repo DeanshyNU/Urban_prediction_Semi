@@ -11,7 +11,7 @@ Usage:
 Environment variables:
   CONV_TYPE: graphconv (default), sageconv, appnp
   PRETRAINED_PATH: path to pre-trained model checkpoint
-  FILTER_MODE: none (default), mc_dropout, graph_uncertainty
+  FILTER_MODE: none (default), mc_dropout, graph_uncertainty, conformal
   LAMBDA_PSEUDO: pseudo-label loss weight (default 1.0)
   UPDATE_INTERVAL: epochs between pseudo-label updates (default 30)
 """
@@ -24,6 +24,7 @@ from datetime import datetime
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
 project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+_conformal_valid_loader = None  # set by main() for conformal calibration
 
 # Config from environment
 conv_type = os.environ.get('CONV_TYPE', 'graphconv').lower()
@@ -243,6 +244,119 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
             'spatial_scale': SPATIAL_SCALE,
         }
 
+    elif filter_mode == 'conformal':
+        # Conformal Prediction: use calibration residuals from valid set to weight pseudo-labels
+        # Weight based on model's actual prediction accuracy near each unlabeled node
+        K_NEIGHBORS = 5  # number of nearest labeled neighbors for local calibration
+        WEIGHT_SCALE = 10.0  # controls how sharply interval width affects weight
+
+        model.eval()
+
+        # Step A: Collect predictions on TRAIN set (for pseudo-labels)
+        sample_preds_u = []
+        with torch.no_grad():
+            for _batch in loader:
+                _batch = _batch.to(device)
+                _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
+                label_mask = _batch.label_mask
+                batch_size = _batch.x.shape[0] // nNodes
+                unlabeled_pred = _yHat[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
+                sample_preds_u.append(unlabeled_pred.cpu().numpy())
+        pseudo_labels = np.concatenate(sample_preds_u, axis=0)
+
+        # Step B: Calibrate on VALID set (model's actual residuals on unseen data)
+        # valid_loader is passed via adj_matrix argument (repurposed for conformal)
+        # We need the valid loader - it's stored in the global scope by main()
+        valid_loader_ref = _conformal_valid_loader  # set by main() before calling
+        val_preds_l = []
+        val_targets_l = []
+        with torch.no_grad():
+            for _batch in valid_loader_ref:
+                _batch = _batch.to(device)
+                _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
+                label_mask = _batch.label_mask
+                batch_size = _batch.x.shape[0] // nNodes
+                labeled_pred = _yHat[label_mask].squeeze(-1).reshape(batch_size, nNodes_labeled)
+                labeled_target = _batch.y[label_mask].squeeze(-1).reshape(batch_size, nNodes_labeled)
+                val_preds_l.append(labeled_pred.cpu().numpy())
+                val_targets_l.append(labeled_target.cpu().numpy())
+
+        val_preds_l = np.concatenate(val_preds_l, axis=0)  # (nValSamples, nNodes_labeled)
+        val_targets_l = np.concatenate(val_targets_l, axis=0)
+
+        # Per-labeled-node calibration residual (mean absolute error on valid set)
+        per_node_residual = np.mean(np.abs(val_preds_l - val_targets_l), axis=0)  # (nNodes_labeled,)
+        print(f"  [Conformal] Per-node valid residual: min={per_node_residual.min():.4f}, "
+              f"max={per_node_residual.max():.4f}, mean={per_node_residual.mean():.4f}")
+
+        # Step C: For each unlabeled node, compute interval width from K nearest labeled neighbors
+        # Use adjacency matrix to find nearest labeled neighbors (by edge weight)
+        interval_widths = np.zeros(nNodes_unlabeled)
+        n_labeled_nbs_list = []
+
+        for u in range(nNodes_unlabeled):
+            u_global = nNodes_labeled + u
+            # Find labeled neighbors sorted by edge weight (descending)
+            labeled_nbs = []
+            for j in range(nNodes_labeled):
+                ew = adj_matrix[u_global, j]
+                if ew > 0:
+                    labeled_nbs.append((j, ew))
+            labeled_nbs.sort(key=lambda x: -x[1])  # sort by weight descending
+
+            n_labeled_nbs_list.append(len(labeled_nbs))
+
+            if len(labeled_nbs) == 0:
+                # No labeled neighbors: maximum uncertainty
+                interval_widths[u] = per_node_residual.max() * 2
+                continue
+
+            # Take top K neighbors
+            top_k = labeled_nbs[:K_NEIGHBORS]
+            # Weighted average of their calibration residuals
+            weighted_residual = 0.0
+            total_weight = 0.0
+            for nb_idx, ew in top_k:
+                weighted_residual += ew * per_node_residual[nb_idx]
+                total_weight += ew
+            interval_widths[u] = weighted_residual / total_weight if total_weight > 0 else per_node_residual.mean()
+
+        # Step D: Convert interval widths to weights
+        # Narrow interval → high weight, wide interval → low weight
+        conformal_weights = 1.0 / (1.0 + interval_widths * WEIGHT_SCALE)
+
+        # Broadcast weights to all time samples (weights are per-node, static)
+        final_weights = np.tile(conformal_weights, (pseudo_labels.shape[0], 1))
+        mc_std = np.zeros_like(pseudo_labels)
+
+        # Debug statistics
+        debug_mc = {
+            'interval_width_min': interval_widths.min(),
+            'interval_width_max': interval_widths.max(),
+            'interval_width_mean': interval_widths.mean(),
+            'interval_width_median': np.median(interval_widths),
+            'conformal_weight_min': conformal_weights.min(),
+            'conformal_weight_max': conformal_weights.max(),
+            'conformal_weight_mean': conformal_weights.mean(),
+            'conformal_weight_std': conformal_weights.std(),
+            'conformal_weight_above_05': (conformal_weights > 0.5).mean() * 100,
+            'conformal_weight_below_02': (conformal_weights < 0.2).mean() * 100,
+            'per_node_residual_min': per_node_residual.min(),
+            'per_node_residual_max': per_node_residual.max(),
+            'per_node_residual_mean': per_node_residual.mean(),
+            'labeled_nbs_min': min(n_labeled_nbs_list),
+            'labeled_nbs_max': max(n_labeled_nbs_list),
+            'labeled_nbs_mean': np.mean(n_labeled_nbs_list),
+            'nodes_with_0_labeled_nbs': sum(1 for n in n_labeled_nbs_list if n == 0),
+            'K_neighbors': K_NEIGHBORS,
+            'weight_scale': WEIGHT_SCALE,
+        }
+        print(f"  [Conformal] Interval widths: [{interval_widths.min():.4f}, {interval_widths.max():.4f}], "
+              f"mean={interval_widths.mean():.4f}")
+        print(f"  [Conformal] Weights: [{conformal_weights.min():.4f}, {conformal_weights.max():.4f}], "
+              f"mean={conformal_weights.mean():.4f}, std={conformal_weights.std():.4f}")
+        print(f"  [Conformal] Nodes with 0 labeled nbs: {sum(1 for n in n_labeled_nbs_list if n == 0)}")
+
     else:
         # No filtering: single forward pass, equal weights
         model.eval()
@@ -363,8 +477,14 @@ def main():
         'thres': 0.1,
         'geoFeatures': 'full',
     }
-    n_unlabeled = 200
+    n_unlabeled = int(os.environ.get('N_UNLABELED', 200))
+    dataParam['batchSize'] = int(os.environ.get('BATCH_SIZE', 128))
+    os.environ['OUTPUT_DIR'] = output_dir
     trainLoader, validLoader, metadata, _ = data_semi.dataGen(dataParam, path, n_unlabeled=n_unlabeled)
+
+    # Make valid_loader accessible for conformal calibration
+    global _conformal_valid_loader
+    _conformal_valid_loader = validLoader
 
     nNodes = metadata['nNodes']
     nNodes_labeled = metadata['nNodes_labeled']

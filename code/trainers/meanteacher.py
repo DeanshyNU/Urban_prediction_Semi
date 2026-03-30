@@ -4,65 +4,232 @@ Mean Teacher training module
 import numpy as np
 import torch
 import os
+import random as _random
 from collections import defaultdict
 from utils import RMSE
 from copy import deepcopy
 
 
+# ==================== Structured Data Augmentation ====================
+# Feature layout (1343 dims total, window=2):
+#   WRF block: 315 dims = 5 time steps x 63 dims/step
+#     Time step order in feature vector: [current(63), hist[-2](63), hist[-1](63), fut[+1](63), fut[+2](63)]
+#     Within each 63-dim step: 7 variables x 9 grid points
+#       Tair(0-8), Tskin(9-17), Tsoil(18-26), Humid(27-35), Irrad(36-44), WindX(45-53), WindY(54-62)
+#   CLMS: 3 dims (dynamic)
+#   UrbanFeature: 17 dims (static)
+#   GeoEmbed: 1008 dims (static)
+#
+# Variable importance for target temperature:
+#   High:   Tair (corr=0.897), Tskin, Tsoil
+#   Medium: Irrad, Humid
+#   Low:    WindX, WindY, CLMS
+
+# --- WRF variable group definitions (offsets within a single 63-dim time step) ---
+WRF_VAR_GROUPS = {
+    'Tair':  (0, 9),    # indices 0-8
+    'Tskin': (9, 18),   # indices 9-17
+    'Tsoil': (18, 27),  # indices 18-26
+    'Humid': (27, 36),  # indices 27-35
+    'Irrad': (36, 45),  # indices 36-44
+    'WindX': (45, 54),  # indices 45-53
+    'WindY': (54, 63),  # indices 54-62
+}
+
+# Variable importance tiers
+HIGH_IMPORTANCE_VARS = ['Tair', 'Tskin', 'Tsoil']
+MEDIUM_IMPORTANCE_VARS = ['Irrad', 'Humid']
+LOW_IMPORTANCE_VARS = ['WindX', 'WindY']
+
+# Feature dimension constants (window=2)
+WRF_STEP_DIM = 63
+WRF_WINDOW = 2
+WRF_TOTAL_STEPS = 2 * WRF_WINDOW + 1  # 5 time steps
+WRF_TOTAL_DIM = WRF_STEP_DIM * WRF_TOTAL_STEPS  # 315
+CLMS_DIM = 3
+URBAN_DIM = 17
+# GeoEmbed dim is computed dynamically as total_dim - WRF_TOTAL_DIM - CLMS_DIM - URBAN_DIM
+
+
+def _get_feature_layout(total_dim):
+    """Compute feature block boundaries from total feature dimension."""
+    geo_dim = total_dim - WRF_TOTAL_DIM - CLMS_DIM - URBAN_DIM
+    return {
+        'wrf':   (0, WRF_TOTAL_DIM),                                              # 0 : 315
+        'clms':  (WRF_TOTAL_DIM, WRF_TOTAL_DIM + CLMS_DIM),                      # 315 : 318
+        'urban': (WRF_TOTAL_DIM + CLMS_DIM, WRF_TOTAL_DIM + CLMS_DIM + URBAN_DIM),  # 318 : 335
+        'geo':   (WRF_TOTAL_DIM + CLMS_DIM + URBAN_DIM, total_dim),              # 335 : 1343
+        'geo_dim': geo_dim,
+    }
+
+
+def _get_wrf_time_step_offsets():
+    """Return the starting offset of each WRF time step in the feature vector.
+    Layout: [current(63), hist[-2](63), hist[-1](63), fut[+1](63), fut[+2](63)]
+    Time step indices: 0=current, 1=hist[-2], 2=hist[-1], 3=fut[+1], 4=fut[+2]
+    """
+    return [i * WRF_STEP_DIM for i in range(WRF_TOTAL_STEPS)]
+
+
+def _build_wrf_var_indices(var_names):
+    """Build a list of absolute feature indices for given WRF variable names across ALL time steps."""
+    offsets = _get_wrf_time_step_offsets()
+    indices = []
+    for step_offset in offsets:
+        for var in var_names:
+            start, end = WRF_VAR_GROUPS[var]
+            indices.extend(range(step_offset + start, step_offset + end))
+    return indices
+
+
+def _build_wrf_timestep_indices(step_idx):
+    """Build absolute feature indices for a single WRF time step (all variables)."""
+    offset = step_idx * WRF_STEP_DIM
+    return list(range(offset, offset + WRF_STEP_DIM))
+
+
+def _drop_edges(edge_index, edge_attr, drop_rate):
+    """Drop edges randomly. Returns augmented edge_index and edge_attr."""
+    if drop_rate <= 0 or edge_index.size(1) == 0:
+        return edge_index, edge_attr
+    num_edges = edge_index.size(1)
+    keep_mask = torch.rand(num_edges, device=edge_index.device) > drop_rate
+    # Safety: keep at least 50% of edges
+    if keep_mask.sum() < num_edges * 0.5:
+        keep_mask = torch.rand(num_edges, device=edge_index.device) > 0.5
+    edge_index_aug = edge_index[:, keep_mask]
+    edge_attr_aug = edge_attr[keep_mask] if edge_attr is not None else None
+    return edge_index_aug, edge_attr_aug
+
+
+def structured_augment_weak(x, edge_index, edge_attr):
+    """
+    Weak augmentation for SimRegMatch / HPL pseudo-label generation.
+    Design:
+      - Keep Tair + Tskin (core temperature variables, always preserved)
+      - Mask 1 low-importance variable group (random from WindX/WindY/CLMS)
+      - Mask 10% of GeoEmbed dims
+      - No edge dropout, no time step masking
+    """
+    total_dim = x.size(1)
+    layout = _get_feature_layout(total_dim)
+    x_aug = x.clone()
+
+    # 1. Mask 1 random low-importance group (from WindX, WindY, CLMS)
+    low_choices = ['WindX', 'WindY', 'CLMS']
+    chosen = _random.choice(low_choices)
+    if chosen == 'CLMS':
+        clms_start, clms_end = layout['clms']
+        x_aug[:, clms_start:clms_end] = 0.0
+    else:
+        indices = _build_wrf_var_indices([chosen])
+        x_aug[:, indices] = 0.0
+
+    # 2. Mask 10% of GeoEmbed dims
+    geo_start, geo_end = layout['geo']
+    geo_dim = layout['geo_dim']
+    geo_mask = torch.rand(geo_dim, device=x.device) > 0.10
+    x_aug[:, geo_start:geo_end] = x_aug[:, geo_start:geo_end] * geo_mask.float().unsqueeze(0)
+
+    return x_aug, edge_index, edge_attr
+
+
+def structured_augment_strong(x, edge_index, edge_attr):
+    """
+    Strong augmentation for SimRegMatch / HPL student predictions.
+    Design:
+      - Keep only Tair (most critical, corr=0.897)
+      - Mask 2-3 medium/low importance groups (random from Humid/Irrad/WindX/WindY/CLMS)
+      - Mask 1 WRF time step (random, not current step 0)
+      - Mask 30% of GeoEmbed dims
+      - Drop 25% edges
+    """
+    total_dim = x.size(1)
+    layout = _get_feature_layout(total_dim)
+    x_aug = x.clone()
+
+    # 1. Mask 2-3 medium/low importance variable groups
+    candidates = ['Humid', 'Irrad', 'WindX', 'WindY', 'CLMS']
+    n_mask = _random.choice([2, 3])
+    chosen_groups = _random.sample(candidates, min(n_mask, len(candidates)))
+    wrf_vars_to_mask = [v for v in chosen_groups if v != 'CLMS']
+    if wrf_vars_to_mask:
+        indices = _build_wrf_var_indices(wrf_vars_to_mask)
+        x_aug[:, indices] = 0.0
+    if 'CLMS' in chosen_groups:
+        clms_start, clms_end = layout['clms']
+        x_aug[:, clms_start:clms_end] = 0.0
+
+    # 2. Mask 1 random WRF time step (not current=step 0, to preserve some current info)
+    #    Steps: 0=current, 1=hist[-2], 2=hist[-1], 3=fut[+1], 4=fut[+2]
+    step_to_mask = _random.choice([1, 2, 3, 4])
+    step_indices = _build_wrf_timestep_indices(step_to_mask)
+    x_aug[:, step_indices] = 0.0
+
+    # 3. Mask 30% of GeoEmbed dims
+    geo_start, geo_end = layout['geo']
+    geo_dim = layout['geo_dim']
+    geo_mask = torch.rand(geo_dim, device=x.device) > 0.30
+    x_aug[:, geo_start:geo_end] = x_aug[:, geo_start:geo_end] * geo_mask.float().unsqueeze(0)
+
+    # 4. Drop 25% of edges
+    edge_index_aug, edge_attr_aug = _drop_edges(edge_index, edge_attr, drop_rate=0.25)
+
+    return x_aug, edge_index_aug, edge_attr_aug
+
+
+def structured_augment_mt(x, edge_index, edge_attr):
+    """
+    Mean Teacher augmentation: equal strength, different random masks for eta and eta'.
+    Per original MT paper: both views should have the same augmentation strength
+    but different random realizations.
+    Design (each call produces one view):
+      - Always keep Tair (most critical)
+      - Mask 2 random medium/low groups (from Humid/Irrad/WindX/WindY/CLMS)
+      - Mask 1 random WRF time step (not current)
+      - Mask 20% of GeoEmbed dims (random)
+      - Drop 20% of edges (random)
+    """
+    total_dim = x.size(1)
+    layout = _get_feature_layout(total_dim)
+    x_aug = x.clone()
+
+    # 1. Mask 2 medium/low importance variable groups
+    candidates = ['Humid', 'Irrad', 'WindX', 'WindY', 'CLMS']
+    chosen_groups = _random.sample(candidates, 2)
+    wrf_vars_to_mask = [v for v in chosen_groups if v != 'CLMS']
+    if wrf_vars_to_mask:
+        indices = _build_wrf_var_indices(wrf_vars_to_mask)
+        x_aug[:, indices] = 0.0
+    if 'CLMS' in chosen_groups:
+        clms_start, clms_end = layout['clms']
+        x_aug[:, clms_start:clms_end] = 0.0
+
+    # 2. Mask 1 random WRF time step (not current)
+    step_to_mask = _random.choice([1, 2, 3, 4])
+    step_indices = _build_wrf_timestep_indices(step_to_mask)
+    x_aug[:, step_indices] = 0.0
+
+    # 3. Mask 20% of GeoEmbed dims
+    geo_start, geo_end = layout['geo']
+    geo_dim = layout['geo_dim']
+    geo_mask = torch.rand(geo_dim, device=x.device) > 0.20
+    x_aug[:, geo_start:geo_end] = x_aug[:, geo_start:geo_end] * geo_mask.float().unsqueeze(0)
+
+    # 4. Drop 20% edges
+    edge_index_aug, edge_attr_aug = _drop_edges(edge_index, edge_attr, drop_rate=0.20)
+
+    return x_aug, edge_index_aug, edge_attr_aug
+
+
+# Legacy wrapper for backward compatibility
 def gnn_augment(x, edge_index, edge_attr, noise_std=0.15, edge_drop_rate=0.15,
                 feat_mask_rate=0.15):
     """
-    GNN-aware stochastic augmentation for creating different views.
-    Designed for urban spatial prediction with weather/climate features.
-
-    Three types of perturbation (applied independently per call):
-    1. Feature noise: Gaussian noise on node features (simulates WRF/CLMS measurement uncertainty)
-    2. Edge dropout: randomly removes edges (forces model to learn robust spatial relationships)
-    3. Feature masking: randomly zeros out entire feature dimensions (prevents over-reliance on
-       specific WRF channels, e.g. model must predict without wind speed or without humidity)
-
-    Default rates (0.15) are based on GNN augmentation literature:
-    - DropEdge (ICLR 2020): 10-20% edge drop
-    - Data Augmentation for GNNs (AAAI 2021): 10-20% feature mask
-    - Higher than previous 0.1 to create meaningful prediction differences for MT consistency loss
-
-    Args:
-        x: node features (N, D)
-        edge_index: edge indices (2, E)
-        edge_attr: edge weights (E,)
-        noise_std: std of Gaussian noise added to features
-        edge_drop_rate: fraction of edges to randomly drop
-        feat_mask_rate: fraction of feature dimensions to randomly mask
-    Returns:
-        x_aug, edge_index_aug, edge_attr_aug
+    DEPRECATED: Use structured_augment_mt() instead.
+    Kept for backward compatibility. Now delegates to structured_augment_mt.
     """
-    # 1. Feature noise (simulates WRF/CLMS measurement uncertainty)
-    x_aug = x + torch.randn_like(x) * noise_std
-
-    # 2. Edge dropout (forces robust spatial relationship learning)
-    if edge_drop_rate > 0 and edge_index.size(1) > 0:
-        num_edges = edge_index.size(1)
-        keep_mask = torch.rand(num_edges, device=edge_index.device) > edge_drop_rate
-        # Ensure at least 50% of edges are kept
-        if keep_mask.sum() < num_edges * 0.5:
-            keep_mask = torch.rand(num_edges, device=edge_index.device) > 0.5
-        edge_index_aug = edge_index[:, keep_mask]
-        edge_attr_aug = edge_attr[keep_mask] if edge_attr is not None else None
-    else:
-        edge_index_aug = edge_index
-        edge_attr_aug = edge_attr
-
-    # 3. Feature masking (prevents over-reliance on specific WRF channels)
-    # Masks entire feature dimensions (columns), so all nodes lose the same features
-    if feat_mask_rate > 0:
-        feat_dim = x_aug.size(1)
-        mask = torch.rand(feat_dim, device=x_aug.device) > feat_mask_rate
-        # Ensure at least 50% of features are kept
-        if mask.sum() < feat_dim * 0.5:
-            mask = torch.rand(feat_dim, device=x_aug.device) > 0.5
-        x_aug = x_aug * mask.float().unsqueeze(0)
-
-    return x_aug, edge_index_aug, edge_attr_aug
+    return structured_augment_mt(x, edge_index, edge_attr)
 
 
 def loadCheckPoint(modelName, model, opt, device, load=False, resetLr=False, lr=5e-5, predMode=False):
@@ -116,14 +283,14 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
                       feat_mask_rate=0.15):
     """
     Standard Mean Teacher training (independent graph version)
-    with GNN-aware augmentation on both labeled and unlabeled data.
+    with structured data augmentation.
 
-    Key changes from basic MT:
-    - Both student and teacher in train mode (dropout as implicit noise)
-    - GNN augmentation (feature noise + edge dropout + feature masking) creates
-      meaningful prediction differences for consistency loss
-    - Consistency loss on unlabeled data with augmented views
-    - Labeled data also augmented (per standard MT: same treatment for all data)
+    Augmentation: structured_augment_mt (equal-strength, different-random for eta and eta')
+    - Always keeps Tair (most important variable)
+    - Masks 2 medium/low importance variable groups (different random per view)
+    - Masks 1 WRF time step (different random per view)
+    - Masks 20% GeoEmbed dims (different random per view)
+    - Drops 20% edges (different random per view)
     """
     student_model.train()
     teacher_model.train()  # train mode for dropout noise
@@ -143,27 +310,21 @@ def train_meanteacher(loader, unlabeled_loader, student_model, teacher_model, lo
 
         opt.zero_grad(set_to_none=True)
 
-        # Labeled: student sees augmented view, loss against ground truth
+        # Labeled: student sees structured-augmented view, loss against ground truth
         _set_model_nNodes(student_model, nNodes)
-        student_x_l, student_ei_l, student_ea_l = gnn_augment(
-            batch.x, batch.edge_index, batch.edge_attr,
-            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
-            feat_mask_rate=feat_mask_rate)
+        student_x_l, student_ei_l, student_ea_l = structured_augment_mt(
+            batch.x, batch.edge_index, batch.edge_attr)
         student_logits = student_model(student_x_l, student_ei_l, student_ea_l)
         labeled_loss = lossFn(student_logits, batch.y)
 
-        # Unlabeled: two independent augmented views for consistency
+        # Unlabeled: two independent structured augmentations (eta and eta') for consistency
         _set_model_nNodes(student_model, unlabeled_nNodes)
         _set_model_nNodes(teacher_model, unlabeled_nNodes)
 
-        student_x_u, student_ei_u, student_ea_u = gnn_augment(
-            unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr,
-            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
-            feat_mask_rate=feat_mask_rate)
-        teacher_x_u, teacher_ei_u, teacher_ea_u = gnn_augment(
-            unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr,
-            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
-            feat_mask_rate=feat_mask_rate)
+        student_x_u, student_ei_u, student_ea_u = structured_augment_mt(
+            unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr)
+        teacher_x_u, teacher_ei_u, teacher_ea_u = structured_augment_mt(
+            unlabeled_batch.x, unlabeled_batch.edge_index, unlabeled_batch.edge_attr)
 
         with torch.no_grad():
             teacher_predictions = teacher_model(teacher_x_u, teacher_ei_u, teacher_ea_u)
@@ -232,10 +393,13 @@ def train_meanteacher_unified(loader, student_model, teacher_model, lossFn, cons
                               global_step=0, noise_std=0.15, edge_drop_rate=0.15,
                               feat_mask_rate=0.15):
     """
-    Standard Mean Teacher training (per CuriousAI official implementation)
-    with GNN-aware augmentation:
-    - Student and Teacher both in train mode (both have dropout noise)
-    - Two independent GNN augmentations: feature noise + edge dropout + feature masking
+    Standard Mean Teacher training (unified graph version).
+    Structured augmentation: two equal-strength, different-random views (eta and eta').
+    - Always keeps Tair (most important variable)
+    - Masks 2 medium/low importance variable groups (different random per view)
+    - Masks 1 WRF time step (different random per view)
+    - Masks 20% GeoEmbed dims (different random per view)
+    - Drops 20% edges (different random per view)
     - Supervised loss: only on labeled nodes
     - Consistency loss: on ALL nodes (labeled + unlabeled)
     - Teacher updated via EMA, no gradient
@@ -253,17 +417,12 @@ def train_meanteacher_unified(loader, student_model, teacher_model, lossFn, cons
         batch = batch.to(device)
         opt.zero_grad(set_to_none=True)
 
-        # Create two independent GNN-augmented views (per official MT + GNN augmentation)
-        # View 1 (student): feature noise η + edge dropout + feature masking
-        # View 2 (teacher): feature noise η' + different edge dropout + different feature masking
-        student_x, student_ei, student_ea = gnn_augment(
-            batch.x, batch.edge_index, batch.edge_attr,
-            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
-            feat_mask_rate=feat_mask_rate)
-        teacher_x, teacher_ei, teacher_ea = gnn_augment(
-            batch.x, batch.edge_index, batch.edge_attr,
-            noise_std=noise_std, edge_drop_rate=edge_drop_rate,
-            feat_mask_rate=feat_mask_rate)
+        # Create two independent structured-augmented views (eta and eta')
+        # Both have equal strength but different random masks/drops
+        student_x, student_ei, student_ea = structured_augment_mt(
+            batch.x, batch.edge_index, batch.edge_attr)
+        teacher_x, teacher_ei, teacher_ea = structured_augment_mt(
+            batch.x, batch.edge_index, batch.edge_attr)
 
         # Forward: both models process different augmented views of the unified graph
         all_student = student_model(student_x, student_ei, student_ea)

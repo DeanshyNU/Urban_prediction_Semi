@@ -61,8 +61,116 @@ class UncertaintyLearner(nn.Module):
 
 # ==================== Augmentation ====================
 def apply_augmentation(x, noise_std=0.05):
-    """Apply random noise augmentation to node features."""
+    """DEPRECATED: kept for reference. Use structured augmentation below."""
     return x + torch.randn_like(x) * noise_std
+
+
+# ==================== Structured Data Augmentation ====================
+# Feature layout (1343 dims total, window=2):
+#   WRF block: 315 dims = 5 time steps x 63 dims/step
+#     Time step order: [current(63), hist[-2](63), hist[-1](63), fut[+1](63), fut[+2](63)]
+#     Within each 63-dim step: 7 variables x 9 grid points
+#       Tair(0-8), Tskin(9-17), Tsoil(18-26), Humid(27-35), Irrad(36-44), WindX(45-53), WindY(54-62)
+#   CLMS: 3 dims (dynamic)
+#   UrbanFeature: 17 dims (static)
+#   GeoEmbed: remaining dims (static)
+import random as _random
+
+WRF_VAR_GROUPS = {
+    'Tair': (0, 9), 'Tskin': (9, 18), 'Tsoil': (18, 27),
+    'Humid': (27, 36), 'Irrad': (36, 45), 'WindX': (45, 54), 'WindY': (54, 63),
+}
+WRF_STEP_DIM = 63
+WRF_WINDOW = 2
+WRF_TOTAL_STEPS = 2 * WRF_WINDOW + 1  # 5
+WRF_TOTAL_DIM = WRF_STEP_DIM * WRF_TOTAL_STEPS  # 315
+CLMS_DIM = 3
+URBAN_DIM = 17
+
+
+def _get_feature_layout(total_dim):
+    geo_dim = total_dim - WRF_TOTAL_DIM - CLMS_DIM - URBAN_DIM
+    return {
+        'wrf': (0, WRF_TOTAL_DIM),
+        'clms': (WRF_TOTAL_DIM, WRF_TOTAL_DIM + CLMS_DIM),
+        'urban': (WRF_TOTAL_DIM + CLMS_DIM, WRF_TOTAL_DIM + CLMS_DIM + URBAN_DIM),
+        'geo': (WRF_TOTAL_DIM + CLMS_DIM + URBAN_DIM, total_dim),
+        'geo_dim': geo_dim,
+    }
+
+
+def _build_wrf_var_indices(var_names):
+    offsets = [i * WRF_STEP_DIM for i in range(WRF_TOTAL_STEPS)]
+    indices = []
+    for step_offset in offsets:
+        for var in var_names:
+            start, end = WRF_VAR_GROUPS[var]
+            indices.extend(range(step_offset + start, step_offset + end))
+    return indices
+
+
+def _build_wrf_timestep_indices(step_idx):
+    offset = step_idx * WRF_STEP_DIM
+    return list(range(offset, offset + WRF_STEP_DIM))
+
+
+def _drop_edges(edge_index, edge_attr, drop_rate):
+    if drop_rate <= 0 or edge_index.size(1) == 0:
+        return edge_index, edge_attr
+    num_edges = edge_index.size(1)
+    keep_mask = torch.rand(num_edges, device=edge_index.device) > drop_rate
+    if keep_mask.sum() < num_edges * 0.5:
+        keep_mask = torch.rand(num_edges, device=edge_index.device) > 0.5
+    return edge_index[:, keep_mask], (edge_attr[keep_mask] if edge_attr is not None else None)
+
+
+def structured_augment_weak(x, edge_index, edge_attr):
+    """Weak augmentation: keep Tair+Tskin, mask 1 low group, mask 10% GeoEmbed."""
+    total_dim = x.size(1)
+    layout = _get_feature_layout(total_dim)
+    x_aug = x.clone()
+
+    low_choices = ['WindX', 'WindY', 'CLMS']
+    chosen = _random.choice(low_choices)
+    if chosen == 'CLMS':
+        s, e = layout['clms']
+        x_aug[:, s:e] = 0.0
+    else:
+        x_aug[:, _build_wrf_var_indices([chosen])] = 0.0
+
+    geo_start, geo_end = layout['geo']
+    geo_mask = torch.rand(layout['geo_dim'], device=x.device) > 0.10
+    x_aug[:, geo_start:geo_end] *= geo_mask.float().unsqueeze(0)
+
+    return x_aug, edge_index, edge_attr
+
+
+def structured_augment_strong(x, edge_index, edge_attr):
+    """Strong augmentation: keep Tair only, mask 2-3 med/low groups, mask 1 time step,
+    mask 30% GeoEmbed, drop 25% edges."""
+    total_dim = x.size(1)
+    layout = _get_feature_layout(total_dim)
+    x_aug = x.clone()
+
+    candidates = ['Humid', 'Irrad', 'WindX', 'WindY', 'CLMS']
+    n_mask = _random.choice([2, 3])
+    chosen_groups = _random.sample(candidates, min(n_mask, len(candidates)))
+    wrf_vars = [v for v in chosen_groups if v != 'CLMS']
+    if wrf_vars:
+        x_aug[:, _build_wrf_var_indices(wrf_vars)] = 0.0
+    if 'CLMS' in chosen_groups:
+        s, e = layout['clms']
+        x_aug[:, s:e] = 0.0
+
+    step_to_mask = _random.choice([1, 2, 3, 4])
+    x_aug[:, _build_wrf_timestep_indices(step_to_mask)] = 0.0
+
+    geo_start, geo_end = layout['geo']
+    geo_mask = torch.rand(layout['geo_dim'], device=x.device) > 0.30
+    x_aug[:, geo_start:geo_end] *= geo_mask.float().unsqueeze(0)
+
+    edge_index_aug, edge_attr_aug = _drop_edges(edge_index, edge_attr, drop_rate=0.25)
+    return x_aug, edge_index_aug, edge_attr_aug
 
 
 # ==================== Main ====================
@@ -172,7 +280,8 @@ def main():
         print(f"  Nodes: {nNodes} ({nNodes_labeled} labeled + {nNodes_unlabeled} unlabeled)", file=f)
         print(f"  w_ulb: {w_ulb}", file=f)
         print(f"  Bi-level freq: every {bilevel_freq} iterations", file=f)
-        print(f"  Weak noise: {weak_noise}, Strong noise: {strong_noise}", file=f)
+        print(f"  Augmentation: structured (weak=keep Tair+Tskin/mask 1 low/10%geo; "
+              f"strong=keep Tair/mask 2-3 groups/1 timestep/30%geo/25%edges)", file=f)
         print(f"  LR backbone: {lr_backbone}, LR unc: {lr_unc}", file=f)
         print(f"  Feature dim: {iDim}", file=f)
         print(f"  Use FPS: {use_fps}", file=f)
@@ -200,15 +309,17 @@ def main():
             label_mask = _batch.label_mask
             unlabel_mask = ~label_mask
 
-            # --- Weak augmentation forward ---
-            x_weak = apply_augmentation(_batch.x, weak_noise)
+            # --- Weak augmentation forward (structured: keep Tair+Tskin, mask 1 low group, 10% geo) ---
+            x_weak, ei_weak, ea_weak = structured_augment_weak(
+                _batch.x, _batch.edge_index, _batch.edge_attr)
             with torch.no_grad():
-                pred_weak_all = model(x_weak, _batch.edge_index, _batch.edge_attr)
+                pred_weak_all = model(x_weak, ei_weak, ea_weak)
             pred_weak_ulb = pred_weak_all[unlabel_mask].detach()  # pseudo-labels
 
-            # --- Strong augmentation forward ---
-            x_strong = apply_augmentation(_batch.x, strong_noise)
-            pred_strong_all = model(x_strong, _batch.edge_index, _batch.edge_attr)
+            # --- Strong augmentation forward (structured: keep Tair, mask 2-3 groups, 1 timestep, 30% geo, 25% edges) ---
+            x_strong, ei_strong, ea_strong = structured_augment_strong(
+                _batch.x, _batch.edge_index, _batch.edge_attr)
+            pred_strong_all = model(x_strong, ei_strong, ea_strong)
             pred_strong_labeled = pred_strong_all[label_mask]
             pred_strong_ulb = pred_strong_all[unlabel_mask]
 
@@ -249,27 +360,29 @@ def main():
                     pred_inner = fmodel_dec(feat_inner)
                     inner_labeled_loss = F.mse_loss(pred_inner[label_mask], y_labeled)
 
-                    # Weak augmentation pseudo-labels (no grad)
+                    # Weak augmentation pseudo-labels (no grad, structured)
                     with torch.no_grad():
-                        x_weak_bl = apply_augmentation(_batch.x, weak_noise)
+                        x_weak_bl, ei_weak_bl, ea_weak_bl = structured_augment_weak(
+                            _batch.x, _batch.edge_index, _batch.edge_attr)
                         feat_weak = x_weak_bl
                         for _f in model.encoder:
                             feat_weak = _f(feat_weak)
                         for _f in model.processor:
                             if isinstance(_f, torch_geometric_nn_types):
-                                feat_weak = _f(feat_weak, _batch.edge_index, _batch.edge_attr)
+                                feat_weak = _f(feat_weak, ei_weak_bl, ea_weak_bl)
                             else:
                                 feat_weak = _f(feat_weak)
                         pred_weak_bl = fmodel_dec(feat_weak)
 
-                    # Strong augmentation predictions
-                    x_strong_bl = apply_augmentation(_batch.x, strong_noise)
+                    # Strong augmentation predictions (structured)
+                    x_strong_bl, ei_strong_bl, ea_strong_bl = structured_augment_strong(
+                        _batch.x, _batch.edge_index, _batch.edge_attr)
                     feat_strong = x_strong_bl
                     for _f in model.encoder:
                         feat_strong = _f(feat_strong)
                     for _f in model.processor:
                         if isinstance(_f, torch_geometric_nn_types):
-                            feat_strong = _f(feat_strong, _batch.edge_index, _batch.edge_attr)
+                            feat_strong = _f(feat_strong, ei_strong_bl, ea_strong_bl)
                         else:
                             feat_strong = _f(feat_strong)
                     pred_strong_bl = fmodel_dec(feat_strong)
@@ -297,21 +410,30 @@ def main():
                     optim_unc.zero_grad()
                     outer_loss.backward()
 
-                    # Debug
+                    # Debug: detailed gradient flow check
                     unc_grad_norm = 0.0
-                    for p in unc_learner.parameters():
+                    unc_has_grad = []
+                    for name, p in unc_learner.named_parameters():
                         if p.grad is not None:
                             unc_grad_norm += p.grad.norm().item() ** 2
+                            unc_has_grad.append(f"{name}:{p.grad.norm().item():.6f}")
+                        else:
+                            unc_has_grad.append(f"{name}:None")
                     unc_grad_norm = unc_grad_norm ** 0.5
 
                     optim_unc.step()
 
-                    if epoch % 100 == 0 and _n == 0:
+                    # Print debug every 100 epochs + first 5 epochs
+                    if (epoch % 100 == 0 or epoch < 5) and _n == 0:
                         with open(f'{output_dir}/{modelName}_log', 'a') as f:
                             print(f"  [Bi-level] unc_grad_norm={unc_grad_norm:.6f}, "
                                   f"outer_loss={outer_loss.item():.6f}, "
                                   f"inner_loss={inner_loss.item():.6f}, "
                                   f"weight_mean={weight_bl.mean().item():.4f}", file=f)
+                            print(f"  [Bi-level] grad_detail: {unc_has_grad}", file=f)
+                            print(f"  [Bi-level] weight_bl requires_grad={weight_bl.requires_grad}, "
+                                  f"inner_loss requires_grad={inner_loss.requires_grad}, "
+                                  f"outer_loss requires_grad={outer_loss.requires_grad}", file=f)
 
             # --- Standard update (backbone + decoder) ---
             # unc_learner weights computed with no_grad (following official code)
