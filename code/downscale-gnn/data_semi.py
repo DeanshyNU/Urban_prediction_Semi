@@ -4,15 +4,83 @@ Labeled: Labeled_Finalized_new.mat (58 stations, 3672 timesteps)
 Unlabeled: Unlabeled_Finalized.mat (2000 stations, sliced to 3672)
 Unified graph: 58 labeled + N unlabeled nodes
 Station selection: FPS (Farthest Point Sampling) based on graph adjacency weights
+Eval modes: spatial (default, leave-8-stations-out) or temporal (75/25 time split)
 """
 import numpy as np
 import torch, pickle, os, mat73, utils
 import scipy.io as sio
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from torch_geometric import utils as pyg_utils
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from sklearn.decomposition import PCA
 from data import genGeoFeatures_v2, build_adj_matrix
+
+
+def select_validation_stations_fps(node_locations, n_valid=8):
+    """
+    Select n_valid most spatially spread stations from labeled stations using FPS.
+    Deterministic (no randomness).
+
+    Args:
+        node_locations: (n_labeled, 2) lat/lon coordinates
+        n_valid: number of validation stations to select
+    Returns:
+        valid_indices: (n_valid,) indices of validation stations
+        train_indices: (n_train,) indices of training stations
+    """
+    n_total = node_locations.shape[0]
+    if n_valid >= n_total:
+        return np.arange(n_total), np.array([])
+
+    # Start from the station closest to the centroid (deterministic)
+    centroid = node_locations.mean(axis=0)
+    dists_to_centroid = np.sqrt(np.sum((node_locations - centroid) ** 2, axis=1))
+    first = np.argmin(dists_to_centroid)
+
+    selected = [first]
+    min_dists = np.sqrt(np.sum((node_locations - node_locations[first:first+1]) ** 2, axis=1))
+
+    for _ in range(n_valid - 1):
+        # Select station farthest from all selected
+        for i in selected:
+            min_dists[i] = -1  # exclude already selected
+        best = np.argmax(min_dists)
+        selected.append(best)
+        new_dists = np.sqrt(np.sum((node_locations - node_locations[best:best+1]) ** 2, axis=1))
+        min_dists = np.minimum(min_dists, new_dists)
+
+    valid_indices = np.array(selected)
+    train_indices = np.array([i for i in range(n_total) if i not in selected])
+
+    return valid_indices, train_indices
+
+
+def visualize_spatial_split(node_locations, train_indices, valid_indices,
+                            unlabeled_locations=None, save_path=None):
+    """Visualize train/valid/unlabeled station split."""
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+
+    if unlabeled_locations is not None:
+        ax.scatter(unlabeled_locations[:, 1], unlabeled_locations[:, 0],
+                   c='lightgray', s=8, alpha=0.4, label=f'Unlabeled ({len(unlabeled_locations)})')
+
+    ax.scatter(node_locations[train_indices, 1], node_locations[train_indices, 0],
+               c='red', s=60, marker='^', zorder=5, label=f'Train labeled ({len(train_indices)})')
+    ax.scatter(node_locations[valid_indices, 1], node_locations[valid_indices, 0],
+               c='blue', s=100, marker='*', zorder=6, label=f'Valid labeled ({len(valid_indices)})')
+
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_title(f'Spatial Split: {len(train_indices)} train + {len(valid_indices)} validation stations')
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"  [Spatial Split] Visualization saved: {save_path}")
+    plt.close()
 
 
 def select_unlabeled_fps(Map_labeled, SM_labeled, Map_all_unlabeled, SM_all_unlabeled, n_select,
@@ -620,16 +688,83 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     print(f"  Total feature dim: {features_all.shape[-1]} "
           f"(WRF={_cfdFeatLen} + CLMS={_clmsFeatLen} + UF={_urbanFeatLen} + Geo={_geoFeatLen})")
 
-    # Train/valid split
-    _generator = torch.Generator().manual_seed(19)
-    _trainLength = int(len(_dataset) * nTrn)
-    _validLength = len(_dataset) - _trainLength
-    trainSet, validSet = torch.utils.data.random_split(
-        _dataset, [_trainLength, _validLength], _generator)
-    _shuffle_train = dataParam.get('shuffle_train', not predMode)
-    trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=_shuffle_train)
-    valid_batch_size = min(_batchSize, len(validSet))
-    validLoader = DataLoader(validSet, batch_size=valid_batch_size, shuffle=False)
+    # ======================== Train/Valid Split ========================
+    eval_mode = os.environ.get('EVAL_MODE', 'spatial').lower()
+
+    if eval_mode == 'spatial':
+        # --- Spatial split: leave 8 stations out for validation ---
+        # Select 8 most spatially spread labeled stations as validation
+        labeled_locs = labeled['NodeLocation']
+        valid_station_idx, train_station_idx = select_validation_stations_fps(labeled_locs, n_valid=8)
+
+        print(f"  [Spatial Split] Eval mode: SPATIAL (leave-{len(valid_station_idx)}-stations-out)")
+        print(f"  [Spatial Split] Train stations: {len(train_station_idx)}, Valid stations: {len(valid_station_idx)}")
+        print(f"  [Spatial Split] Valid station indices: {valid_station_idx.tolist()}")
+        print(f"  [Spatial Split] All {T_2018 - 2*_window} timesteps used for both train and valid")
+
+        # Visualize spatial split
+        try:
+            _output_dir = os.environ.get('OUTPUT_DIR', '')
+            if _output_dir:
+                try:
+                    unlabeled_locs = unlabeled['NodeLocation'][global_indices]
+                except:
+                    unlabeled_locs = None
+                visualize_spatial_split(labeled_locs, train_station_idx, valid_station_idx,
+                                       unlabeled_locations=unlabeled_locs,
+                                       save_path=os.path.join(_output_dir, 'spatial_split.png'))
+        except Exception as e:
+            print(f"  [Spatial Split] Visualization skipped: {e}")
+
+        # Create train label_mask: only train stations are labeled
+        train_label_mask = np.zeros(nNodes_total, dtype=bool)
+        train_label_mask[train_station_idx] = True  # only 50 train stations
+
+        # Create valid label_mask: only valid stations
+        valid_label_mask = np.zeros(nNodes_total, dtype=bool)
+        valid_label_mask[valid_station_idx] = True  # only 8 valid stations
+
+        # Build train dataset (all timesteps, train_label_mask)
+        trainSet = []
+        for i, data in enumerate(_dataset):
+            trainSet.append(Data(
+                x=data.x, y=data.y,
+                label_mask=torch.BoolTensor(train_label_mask),
+                edge_index=data.edge_index, edge_attr=data.edge_attr))
+
+        # Build valid dataset (all timesteps, valid_label_mask)
+        validSet = []
+        for i, data in enumerate(_dataset):
+            validSet.append(Data(
+                x=data.x, y=data.y,
+                label_mask=torch.BoolTensor(valid_label_mask),
+                edge_index=data.edge_index, edge_attr=data.edge_attr))
+
+        _shuffle_train = dataParam.get('shuffle_train', not predMode)
+        trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=_shuffle_train)
+        valid_batch_size = min(_batchSize, len(validSet))
+        validLoader = DataLoader(validSet, batch_size=valid_batch_size, shuffle=False)
+
+        train_indices = list(range(len(trainSet)))
+        valid_indices = list(range(len(validSet)))
+
+    else:
+        # --- Temporal split (original): 75/25 time split, all stations ---
+        print(f"  [Temporal Split] Eval mode: TEMPORAL (75/25 time split)")
+        _generator = torch.Generator().manual_seed(19)
+        _trainLength = int(len(_dataset) * nTrn)
+        _validLength = len(_dataset) - _trainLength
+        trainSet, validSet = torch.utils.data.random_split(
+            _dataset, [_trainLength, _validLength], _generator)
+        _shuffle_train = dataParam.get('shuffle_train', not predMode)
+        trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=_shuffle_train)
+        valid_batch_size = min(_batchSize, len(validSet))
+        validLoader = DataLoader(validSet, batch_size=valid_batch_size, shuffle=False)
+
+        train_indices = trainSet.indices
+        valid_indices = validSet.indices
+        valid_station_idx = None
+        train_station_idx = None
 
     metadata = {
         'nNodes': nNodes_total,
@@ -643,11 +778,14 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
         'geoMethod': dataParam['geoMethod'],
         'poolSize': dataParam['poolSize'],
         'nCompPCA': dataParam['nCompPCA'],
-        'trainIdx': trainSet.indices,
-        'validIdx': validSet.indices,
+        'trainIdx': train_indices,
+        'validIdx': valid_indices,
         'AdjMatrix': Adj,
-        'label_mask': label_mask,
+        'label_mask': label_mask,  # original full label_mask (all 58 labeled)
         'tgt_off': tgt_off,
         'tgt_scl': tgt_scl,
+        'eval_mode': eval_mode,
+        'valid_station_idx': valid_station_idx,
+        'train_station_idx': train_station_idx,
     }
     return trainLoader, validLoader, metadata, validSet

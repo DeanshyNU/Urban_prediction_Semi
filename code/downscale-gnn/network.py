@@ -67,13 +67,20 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes):
     for _n, _batch in enumerate(loader):
         _batch = _batch.to(device)
         _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
-        _loss = lossFn(_yHat,_batch.y)
+        # Use label_mask if available (spatial split mode)
+        if hasattr(_batch, 'label_mask'):
+            mask = _batch.label_mask
+            _loss = lossFn(_yHat[mask], _batch.y[mask])
+            _pred = _yHat[mask].reshape(-1, mask.reshape(-1, nNodes)[0].sum().item())
+            _truth = _batch.y[mask].reshape(-1, mask.reshape(-1, nNodes)[0].sum().item())
+        else:
+            _loss = lossFn(_yHat,_batch.y)
+            _pred = _yHat.reshape(-1,nNodes)
+            _truth = _batch.y.reshape(-1,nNodes)
         _loss.backward(retain_graph=False)
         opt.step()
         opt.zero_grad(set_to_none=True)
         _LOSS += _loss
-        _pred = _yHat.reshape(-1,nNodes)
-        _truth = _batch.y.reshape(-1,nNodes)
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
     scheduler.step()
@@ -88,10 +95,17 @@ def test(loader,model,lossFn,device,nNodes):
     for _n, _batch in enumerate(loader):
         _batch = _batch.to(device)
         _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
-        _loss = lossFn(_yHat,_batch.y)
+        # Use label_mask if available (spatial split mode)
+        if hasattr(_batch, 'label_mask'):
+            mask = _batch.label_mask
+            _loss = lossFn(_yHat[mask], _batch.y[mask])
+            _pred = _yHat[mask].reshape(-1, mask.reshape(-1, nNodes)[0].sum().item())
+            _truth = _batch.y[mask].reshape(-1, mask.reshape(-1, nNodes)[0].sum().item())
+        else:
+            _loss = lossFn(_yHat,_batch.y)
+            _pred = _yHat.reshape(-1,nNodes)
+            _truth = _batch.y.reshape(-1,nNodes)
         _LOSS += _loss
-        _pred = _yHat.reshape(-1,nNodes)
-        _truth = _batch.y.reshape(-1,nNodes)
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
     truth, pred = np.array(truth), np.array(pred)

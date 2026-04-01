@@ -1,13 +1,18 @@
 """
 Supervised GNN data loading - V2 data format
 Loads from Labeled_Finalized_new.mat (58 stations, 3672 timesteps)
+Eval modes: spatial (default, leave-8-stations-out) or temporal (75/25 time split)
 """
 import numpy as np
 import torch, pickle, os, mat73, utils
 import scipy.io as sio
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from torch_geometric import utils as pyg_utils
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
+from data_semi import select_validation_stations_fps, visualize_spatial_split
 from sklearn.decomposition import PCA
 
 
@@ -242,14 +247,67 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False):
     print(f"    Adj: NaN={np.isnan(Adj).sum()}, range=[{Adj.min():.4f}, {Adj.max():.4f}]")
     print(f"    Sample feature[0]: NaN={np.isnan(_feature[0]).sum()}, range=[{_feature[0].min():.4f}, {_feature[0].max():.4f}]")
 
-    # Train/valid split
-    _generator = torch.Generator().manual_seed(19)
-    _trainLength = int(len(_dataset) * nTrn)
-    _validLength = len(_dataset) - _trainLength
-    trainSet, validSet = torch.utils.data.random_split(
-        _dataset, [_trainLength, _validLength], _generator)
-    trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=not predMode)
-    validLoader = DataLoader(validSet, batch_size=len(validSet), shuffle=False)
+    # ======================== Train/Valid Split ========================
+    eval_mode = os.environ.get('EVAL_MODE', 'spatial').lower()
+
+    if eval_mode == 'spatial':
+        # --- Spatial split: leave 8 stations out for validation ---
+        labeled_locs = labeled['NodeLocation']
+        valid_station_idx, train_station_idx = select_validation_stations_fps(labeled_locs, n_valid=8)
+
+        print(f"  [Spatial Split] Train stations: {len(train_station_idx)}, Valid stations: {len(valid_station_idx)}")
+        print(f"  [Spatial Split] Valid station indices: {valid_station_idx.tolist()}")
+
+        # Visualize
+        try:
+            _output_dir = os.environ.get('OUTPUT_DIR', '')
+            if _output_dir:
+                visualize_spatial_split(labeled_locs, train_station_idx, valid_station_idx,
+                                       save_path=os.path.join(_output_dir, 'spatial_split.png'))
+        except Exception as e:
+            print(f"  [Spatial Split] Visualization skipped: {e}")
+
+        # For supervised: train dataset uses only train station targets,
+        # valid dataset uses only valid station targets
+        # All nodes stay in graph for message passing
+        train_mask = np.zeros(nNodes, dtype=bool)
+        train_mask[train_station_idx] = True
+        valid_mask = np.zeros(nNodes, dtype=bool)
+        valid_mask[valid_station_idx] = True
+
+        trainSet = []
+        validSet = []
+        for data in _dataset:
+            trainSet.append(Data(
+                x=data.x, y=data.y,
+                label_mask=torch.BoolTensor(train_mask),
+                edge_index=data.edge_index, edge_attr=data.edge_attr))
+            validSet.append(Data(
+                x=data.x, y=data.y,
+                label_mask=torch.BoolTensor(valid_mask),
+                edge_index=data.edge_index, edge_attr=data.edge_attr))
+
+        trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=not predMode)
+        valid_batch_size = min(_batchSize, len(validSet))
+        validLoader = DataLoader(validSet, batch_size=valid_batch_size, shuffle=False)
+
+        train_indices = list(range(len(trainSet)))
+        valid_indices = list(range(len(validSet)))
+    else:
+        # --- Temporal split (original) ---
+        print(f"  [Temporal Split] Eval mode: TEMPORAL (75/25 time split)")
+        _generator = torch.Generator().manual_seed(19)
+        _trainLength = int(len(_dataset) * nTrn)
+        _validLength = len(_dataset) - _trainLength
+        trainSet, validSet = torch.utils.data.random_split(
+            _dataset, [_trainLength, _validLength], _generator)
+        trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=not predMode)
+        validLoader = DataLoader(validSet, batch_size=len(validSet), shuffle=False)
+
+        train_indices = trainSet.indices
+        valid_indices = validSet.indices
+        valid_station_idx = None
+        train_station_idx = None
 
     metadata = {
         'nNodes': nNodes,
@@ -261,10 +319,13 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False):
         'geoMethod': dataParam['geoMethod'],
         'poolSize': dataParam['poolSize'],
         'nCompPCA': dataParam['nCompPCA'],
-        'trainIdx': trainSet.indices,
-        'validIdx': validSet.indices,
+        'trainIdx': train_indices,
+        'validIdx': valid_indices,
         'AdjMatrix': Adj,
         'tgt_off': tgt_off,
         'tgt_scl': tgt_scl,
+        'eval_mode': eval_mode,
+        'valid_station_idx': valid_station_idx,
+        'train_station_idx': train_station_idx,
     }
     return trainLoader, validLoader, metadata, validSet
