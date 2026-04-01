@@ -95,11 +95,11 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes,nNodes_labeled):
             assert nNodes_total_batch % nNodes == 0, \
                 f"节点数不匹配: batch中有{nNodes_total_batch}个节点，不是{nNodes}的整数倍"
             
-            # 检查2: 确认每个图的有标签和无标签节点数量正确
+            # 检查2: 确认每个图的节点数量正确
             assert nNodes_per_graph == nNodes, \
                 f"每个图的节点数不匹配: {nNodes_per_graph} vs {nNodes}"
-            assert nNodes_labeled_per_graph == nNodes_labeled, \
-                f"每个图的有标签节点数不匹配: {nNodes_labeled_per_graph} vs {nNodes_labeled}"
+            # Note: spatial模式下nNodes_labeled_per_graph可能是50(train)或8(valid)，不一定等于nNodes_labeled(58)
+            # assert nNodes_labeled_per_graph == nNodes_labeled
             
             # 检查3: 确认所有节点都有预测输出
             assert _yHat.shape[0] == nNodes_total_batch, \
@@ -170,9 +170,10 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes,nNodes_labeled):
         _LOSS += _loss
         
         # 只记录有标签节点的预测
-        # _yHat_labeled形状是(batch_size * nNodes_labeled, 1)，需要reshape成(batch_size, nNodes_labeled)
-        _pred = _yHat_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
-        _truth = _y_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
+        # spatial模式下每个图的labeled数可能不等于nNodes_labeled(58)
+        _n_labeled_actual = label_mask.sum().item() // max(1, _batch.x.shape[0] // nNodes)
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
     scheduler.step()
@@ -200,9 +201,10 @@ def test(loader,model,lossFn,device,nNodes,nNodes_labeled):
         _LOSS += _loss
         
         # 只记录有标签节点的预测
-        # _yHat_labeled形状是(batch_size * nNodes_labeled, 1)，需要reshape成(batch_size, nNodes_labeled)
-        _pred = _yHat_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
-        _truth = _y_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
+        # spatial模式下每个图的labeled数可能不等于nNodes_labeled(58)
+        _n_labeled_actual = label_mask.sum().item() // max(1, _batch.x.shape[0] // nNodes)
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
     truth, pred = np.array(truth), np.array(pred)

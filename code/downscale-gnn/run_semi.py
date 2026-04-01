@@ -49,10 +49,15 @@ def main():
         f"节点总数不匹配: {nNodes_total} != {nNodes_labeled} + {nNodes_unlabeled}"
     print(f"✓ 节点数量正确: 总计{nNodes_total}个节点（{nNodes_labeled}有标签 + {nNodes_unlabeled}无标签）")
     
-    # 检查2: 标签掩码
-    assert label_mask.sum() == nNodes_labeled, \
-        f"标签掩码不匹配: {label_mask.sum()} != {nNodes_labeled}"
-    print(f"✓ 标签掩码正确: {nNodes_labeled}个True, {nNodes_unlabeled}个False")
+    # 检查2: 标签掩码 (spatial模式下train只有50个, temporal模式下58个)
+    eval_mode = metadata.get('eval_mode', 'temporal')
+    if eval_mode == 'spatial':
+        n_train_labeled = label_mask.sum()
+        print(f"✓ 标签掩码正确 (spatial): {n_train_labeled}个训练站, {nNodes_labeled - n_train_labeled}个留做validation")
+    else:
+        assert label_mask.sum() == nNodes_labeled, \
+            f"标签掩码不匹配: {label_mask.sum()} != {nNodes_labeled}"
+        print(f"✓ 标签掩码正确: {nNodes_labeled}个True, {nNodes_unlabeled}个False")
     
     # 检查3: 图结构 - 检查有标签和无标签节点之间的边连接
     labeled_indices = np.where(label_mask)[0]
@@ -88,9 +93,10 @@ def main():
     first_sample = trainLoader.dataset[0]
     assert first_sample.x.shape[0] == nNodes_total, \
         f"样本节点数不匹配: {first_sample.x.shape[0]} != {nNodes_total}"
-    assert first_sample.label_mask.sum() == nNodes_labeled, \
-        f"样本标签掩码不匹配: {first_sample.label_mask.sum()} != {nNodes_labeled}"
-    print(f"✓ 数据集样本正确: 每个样本包含{nNodes_total}个节点的特征")
+    if eval_mode != 'spatial':
+        assert first_sample.label_mask.sum() == nNodes_labeled, \
+            f"样本标签掩码不匹配: {first_sample.label_mask.sum()} != {nNodes_labeled}"
+    print(f"✓ 数据集样本正确: 每个样本包含{nNodes_total}个节点的特征, label_mask={first_sample.label_mask.sum()}个True")
     
     # 检查5: 特征维度验证
     print(f"✓ 特征维度验证:")
