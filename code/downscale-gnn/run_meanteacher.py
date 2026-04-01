@@ -175,22 +175,22 @@ def main():
     with open(f'{output_dir}/{modelName}_param.pkl', 'wb') as f:
         pickle.dump({'modelParam': modelParam, 'dataParam': dataParam}, f)
 
-    if torch.cuda.is_available():
-        with open(f'{output_dir}/{modelName}_log', 'w') as f:
-            print("No checkpoint found, starting new model.", file=f)
+    with open(f'{output_dir}/{modelName}_log', 'w') as f:
+        print("No checkpoint found, starting new model.", file=f)
+        if torch.cuda.is_available():
             print(torch.cuda.get_device_name(torch.cuda.current_device()), file=f)
-            print(student, file=f)
-            print("=" * 60, file=f)
-            print("Mean Teacher Configuration (new framework, data_semi.py):", file=f)
-            print(f"  Conv type: {conv_type}", file=f)
-            print(f"  Nodes: {nNodes} ({nNodes_labeled} labeled + {n_unlabeled} unlabeled)", file=f)
-            print(f"  Lambda_U: {lambda_U}", file=f)
-            print(f"  EMA alpha: {alpha_ema}", file=f)
-            print(f"  Augmentation: structured MT (keep Tair, mask 2 groups + 1 timestep + 20% geo + 20% edges)", file=f)
-            print(f"  Consistency loss: MSE on ALL nodes", file=f)
-            print(f"  Feature dim: {iDim}", file=f)
-            print(f"  Use FPS: {use_fps}", file=f)
-            print("=" * 60, file=f)
+        print(student, file=f)
+        print("=" * 60, file=f)
+        print("Mean Teacher Configuration (new framework, data_semi.py):", file=f)
+        print(f"  Conv type: {conv_type}", file=f)
+        print(f"  Nodes: {nNodes} ({nNodes_labeled} labeled + {n_unlabeled} unlabeled)", file=f)
+        print(f"  Lambda_U: {lambda_U}", file=f)
+        print(f"  EMA alpha: {alpha_ema}", file=f)
+        print(f"  Augmentation: structured MT (keep Tair, mask 2 groups + 1 timestep + 20% geo + 20% edges)", file=f)
+        print(f"  Consistency loss: MSE on ALL nodes", file=f)
+        print(f"  Feature dim: {iDim}", file=f)
+        print(f"  Use FPS: {use_fps}", file=f)
+        print("=" * 60, file=f)
 
     # ========== Training ==========
     bestLoss = np.inf

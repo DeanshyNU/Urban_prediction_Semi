@@ -12,7 +12,50 @@ import matplotlib.pyplot as plt
 from torch_geometric import utils as pyg_utils
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from data_semi import select_validation_stations_fps, visualize_spatial_split
+
+
+def select_validation_stations_fps(node_locations, n_valid=8):
+    """Select n_valid most spatially spread stations using FPS. Deterministic."""
+    n_total = node_locations.shape[0]
+    if n_valid >= n_total:
+        return np.arange(n_total), np.array([])
+    centroid = node_locations.mean(axis=0)
+    dists_to_centroid = np.sqrt(np.sum((node_locations - centroid) ** 2, axis=1))
+    first = np.argmin(dists_to_centroid)
+    selected = [first]
+    min_dists = np.sqrt(np.sum((node_locations - node_locations[first:first+1]) ** 2, axis=1))
+    for _ in range(n_valid - 1):
+        for i in selected:
+            min_dists[i] = -1
+        best = np.argmax(min_dists)
+        selected.append(best)
+        new_dists = np.sqrt(np.sum((node_locations - node_locations[best:best+1]) ** 2, axis=1))
+        min_dists = np.minimum(min_dists, new_dists)
+    valid_indices = np.array(selected)
+    train_indices = np.array([i for i in range(n_total) if i not in selected])
+    return valid_indices, train_indices
+
+
+def visualize_spatial_split(node_locations, train_indices, valid_indices,
+                            unlabeled_locations=None, save_path=None):
+    """Visualize train/valid/unlabeled station split."""
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    if unlabeled_locations is not None:
+        ax.scatter(unlabeled_locations[:, 1], unlabeled_locations[:, 0],
+                   c='lightgray', s=8, alpha=0.4, label=f'Unlabeled ({len(unlabeled_locations)})')
+    ax.scatter(node_locations[train_indices, 1], node_locations[train_indices, 0],
+               c='red', s=60, marker='^', zorder=5, label=f'Train labeled ({len(train_indices)})')
+    ax.scatter(node_locations[valid_indices, 1], node_locations[valid_indices, 0],
+               c='blue', s=100, marker='*', zorder=6, label=f'Valid labeled ({len(valid_indices)})')
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_title(f'Spatial Split: {len(train_indices)} train + {len(valid_indices)} validation stations')
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"  [Spatial Split] Visualization saved: {save_path}")
+    plt.close()
 from sklearn.decomposition import PCA
 
 

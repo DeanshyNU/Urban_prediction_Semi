@@ -217,9 +217,9 @@ def main():
     with open(f'{output_dir}/{modelName}_param.pkl', 'wb') as f:
         pickle.dump({'modelParam': modelParam, 'dataParam': dataParam}, f)
 
-    if torch.cuda.is_available():
-        with open(f'{output_dir}/{modelName}_log', 'w') as f:
-            print("No checkpoint found, starting new model.", file=f)
+    with open(f'{output_dir}/{modelName}_log', 'w') as f:
+        print("No checkpoint found, starting new model.", file=f)
+        if torch.cuda.is_available():
             print(torch.cuda.get_device_name(torch.cuda.current_device()), file=f)
             print(model, file=f)
             print("=" * 60, file=f)
