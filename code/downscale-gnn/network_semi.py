@@ -211,6 +211,123 @@ def test(loader,model,lossFn,device,nNodes,nNodes_labeled):
     _RMSE = utils.RMSE(truth,pred)
     return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
 
+
+# ==================== Enhanced Semi-supervised Training Modes ====================
+
+def train_laplacian(loader, model, lossFn, opt, scheduler, device, nNodes, nNodes_labeled,
+                    adj_matrix, lambda_lap=0.1):
+    """
+    Semi-supervised + Graph Laplacian regularization.
+    L = L_supervised + lambda_lap * Σ w_ij * (pred_i - pred_j)²
+    Gives unlabeled nodes a direct training signal (spatial smoothness).
+    """
+    model.train()
+    _LOSS = 0
+    _LAP_LOSS = 0
+    pred, truth = [], []
+
+    # Pre-compute edge list from adjacency (once per epoch)
+    edge_src, edge_dst, edge_w = [], [], []
+    for i in range(adj_matrix.shape[0]):
+        for j in range(i+1, adj_matrix.shape[1]):
+            if adj_matrix[i, j] > 0:
+                edge_src.append(i)
+                edge_dst.append(j)
+                edge_w.append(adj_matrix[i, j])
+    edge_src = torch.LongTensor(edge_src).to(device)
+    edge_dst = torch.LongTensor(edge_dst).to(device)
+    edge_w = torch.FloatTensor(edge_w).to(device)
+
+    for _n, _batch in enumerate(loader):
+        _batch = _batch.to(device)
+        _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
+
+        label_mask = _batch.label_mask
+        _yHat_labeled = _yHat[label_mask]
+        _y_labeled = _batch.y[label_mask]
+
+        # Supervised loss
+        sup_loss = lossFn(_yHat_labeled, _y_labeled)
+
+        # Graph Laplacian loss (on ALL nodes in first graph of batch)
+        batch_size = _batch.x.shape[0] // nNodes
+        _yHat_first = _yHat[:nNodes].squeeze(-1)  # first graph
+        diff = _yHat_first[edge_src] - _yHat_first[edge_dst]
+        lap_loss = torch.mean(edge_w * diff ** 2)
+
+        total_loss = sup_loss + lambda_lap * lap_loss
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+
+        _LOSS += total_loss.item()
+        _LAP_LOSS += lap_loss.item()
+
+        _n_labeled_actual = label_mask.sum().item() // max(1, batch_size)
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        pred += list(_pred.cpu().detach().numpy())
+        truth += list(_truth.cpu().detach().numpy())
+
+    scheduler.step()
+    truth, pred = np.array(truth), np.array(pred)
+    _RMSE = utils.RMSE(truth, pred)
+    n_batches = _n + 1
+    return (_LOSS / n_batches), _RMSE, truth, pred, _LAP_LOSS / n_batches
+
+
+def train_msg_weight(loader, model, lossFn, opt, scheduler, device, nNodes, nNodes_labeled,
+                     unlabeled_discount=0.5):
+    """
+    Semi-supervised with message weighting: labeled neighbors full weight,
+    unlabeled neighbors discounted.
+    Modifies edge_attr before forward pass.
+    """
+    model.train()
+    _LOSS = 0
+    pred, truth = [], []
+
+    for _n, _batch in enumerate(loader):
+        _batch = _batch.to(device)
+        label_mask = _batch.label_mask
+
+        # Modify edge weights: discount edges FROM unlabeled nodes
+        edge_attr_mod = _batch.edge_attr.clone()
+        src_nodes = _batch.edge_index[0]
+        # For each edge, if source is unlabeled → discount weight
+        batch_size = _batch.x.shape[0] // nNodes
+        for b in range(batch_size):
+            offset = b * nNodes
+            for e_idx in range(_batch.edge_index.shape[1]):
+                src = src_nodes[e_idx].item()
+                local_src = src % nNodes  # local node index within graph
+                if not label_mask[src].item():  # source is unlabeled
+                    edge_attr_mod[e_idx] *= unlabeled_discount
+
+        _yHat = model(_batch.x, _batch.edge_index, edge_attr_mod)
+
+        _yHat_labeled = _yHat[label_mask]
+        _y_labeled = _batch.y[label_mask]
+        _loss = lossFn(_yHat_labeled, _y_labeled)
+
+        _loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+        _LOSS += _loss.item()
+
+        _n_labeled_actual = label_mask.sum().item() // max(1, batch_size)
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        pred += list(_pred.cpu().detach().numpy())
+        truth += list(_truth.cpu().detach().numpy())
+
+    scheduler.step()
+    truth, pred = np.array(truth), np.array(pred)
+    _RMSE = utils.RMSE(truth, pred)
+    return (_LOSS / (_n + 1)), _RMSE, truth, pred
+
 def loadCheckPoint(modelName,model,opt,device,load=False,resetLr=False,lr=5e-5,predMode=False,output_dir='./'):
     chkptPath = f'{output_dir}/{modelName}.pt'
     if os.path.exists(chkptPath) and load:

@@ -10,13 +10,15 @@ project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.
 conv_type = os.environ.get('CONV_TYPE', 'graphconv').lower()
 n_unlabeled_env = os.environ.get('N_UNLABELED', '200')
 use_fps = int(os.environ.get('USE_FPS', 0))
+semi_mode = os.environ.get('SEMI_MODE', 'basic').lower()  # basic, laplacian, msg_weight
 fps_tag = '_fps_score' if use_fps == 2 else ('_fps' if use_fps == 1 else '')
+mode_tag = f'_{semi_mode}' if semi_mode != 'basic' else ''
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 job_id = os.environ.get('SLURM_JOB_ID', '')
 if job_id:
-    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}{fps_tag}_{n_unlabeled_env}u_{timestamp}_job{job_id}')
+    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}{fps_tag}{mode_tag}_{n_unlabeled_env}u_{timestamp}_job{job_id}')
 else:
-    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}{fps_tag}_{n_unlabeled_env}u_{timestamp}')
+    output_dir = os.path.join(project_root, 'log', f'semi_supervised_{conv_type}{fps_tag}{mode_tag}_{n_unlabeled_env}u_{timestamp}')
 os.makedirs(output_dir, exist_ok=True)
 
 def main():
@@ -213,17 +215,48 @@ def main():
         print(f"  Degree: min={degrees.min()} max={degrees.max()} mean={degrees.mean():.1f}", file=f)
         print("="*60, file=f)
 
+    # Get adjacency matrix for laplacian mode
+    Adj = metadata['AdjMatrix']
+    lambda_lap = float(os.environ.get('LAMBDA_LAP', '0.1'))
+    unlabeled_discount = float(os.environ.get('UNLABELED_DISCOUNT', '0.5'))
+
+    print(f"Semi mode: {semi_mode}")
+    if semi_mode == 'laplacian':
+        print(f"  Lambda_lap: {lambda_lap}")
+    elif semi_mode == 'msg_weight':
+        print(f"  Unlabeled discount: {unlabeled_discount}")
+
     for epoch in range(EPOCH,nEpoch):
-        trainLoss,trainRMSE,_,_ = network_semi.train(
-            trainLoader, model, lossFn, opt, scheduler, device, 
-            metadata['nNodes'], metadata['nNodes_labeled']
-        )
+        if semi_mode == 'laplacian':
+            trainLoss, trainRMSE, _, _, lap_loss = network_semi.train_laplacian(
+                trainLoader, model, lossFn, opt, scheduler, device,
+                metadata['nNodes'], metadata['nNodes_labeled'],
+                Adj, lambda_lap=lambda_lap
+            )
+        elif semi_mode == 'msg_weight':
+            trainLoss, trainRMSE, _, _ = network_semi.train_msg_weight(
+                trainLoader, model, lossFn, opt, scheduler, device,
+                metadata['nNodes'], metadata['nNodes_labeled'],
+                unlabeled_discount=unlabeled_discount
+            )
+            lap_loss = 0
+        else:
+            trainLoss,trainRMSE,_,_ = network_semi.train(
+                trainLoader, model, lossFn, opt, scheduler, device,
+                metadata['nNodes'], metadata['nNodes_labeled']
+            )
+            lap_loss = 0
+
         validLoss,validRMSE,_,_ = network_semi.test(
-            validLoader, model, lossFn, device, 
+            validLoader, model, lossFn, device,
             metadata['nNodes'], metadata['nNodes_labeled']
         )
         with open(f'{output_dir}/{modelName}_log','a') as f: print("", file=f)
-        with open(f'{output_dir}/{modelName}_log','a') as f: print (f"Epoch {epoch}: loss {trainLoss:1.4e}/{validLoss:1.4e}; RMSE {trainRMSE[0]:1.3f}/{validRMSE[0]:1.3f}; LR {scheduler.get_last_lr()} ",file=f)
+        with open(f'{output_dir}/{modelName}_log','a') as f:
+            log_line = f"Epoch {epoch}: loss {trainLoss:1.4e}/{validLoss:1.4e}; RMSE {trainRMSE[0]:1.3f}/{validRMSE[0]:1.3f}; LR {scheduler.get_last_lr()}"
+            if semi_mode == 'laplacian':
+                log_line += f" | lap_loss={lap_loss:.4e}"
+            print(log_line, file=f)
         with open(f'{output_dir}/{modelName}_log','a') as f: print (f"RMSE std: {trainRMSE[1]:1.3f}/{validRMSE[1]:1.3f}; min: {trainRMSE[2]:1.3f}/{validRMSE[2]:1.3f}; max: {trainRMSE[3]:1.3f}/{validRMSE[3]:1.3f};",file=f)
         
         # 记录到 W&B
