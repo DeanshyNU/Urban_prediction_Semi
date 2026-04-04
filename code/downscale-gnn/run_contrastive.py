@@ -354,29 +354,38 @@ def main():
             print(f"  sup_loss={avg_sup:.4e} | sc_loss={avg_sc:.4e} | gc_loss={avg_gc:.4e} | "
                   f"sim_gap={avg_sim_gap:.4f}", file=f)
 
+        trainLoss_total = avg_sup + lambda_sc*avg_sc + lambda_gc*avg_gc
         wandb.log({
-            'epoch': epoch, 'train_rmse': trainRMSE, 'valid_rmse': validRMSE,
-            'sup_loss': avg_sup, 'sc_loss': avg_sc, 'gc_loss': avg_gc,
-            'sim_gap': avg_sim_gap, 'best_valid_rmse': min(bestLoss, validRMSE),
-            'lr': scheduler.get_last_lr()[0],
+            'epoch': epoch,
+            'train/loss': trainLoss_total,
+            'train/rmse': trainRMSE,
+            'train/sup_loss': avg_sup,
+            'train/sc_loss': avg_sc,
+            'train/gc_loss': avg_gc,
+            'train/sim_gap': avg_sim_gap,
+            'valid/loss': validLoss,
+            'valid/rmse': validRMSE,
+            'learning_rate': scheduler.get_last_lr()[0],
+            'best_valid_rmse': min(bestLoss, validRMSE),
         })
-
-        hist.append([avg_sup + lambda_sc*avg_sc + lambda_gc*avg_gc, validLoss])
 
         if validRMSE < bestLoss:
             bestLoss = validRMSE
             torch.save({'model': model.state_dict(), 'epoch': epoch, 'bestLoss': bestLoss}, chkptPath)
             with open(f'{output_dir}/{modelName}_log', 'a') as f:
                 print(f"  Model saved. Best valid RMSE: {bestLoss:.6f}", file=f)
+            wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
 
         if epoch % 100 == 0:
             print(f"Epoch {epoch}/{nEpoch}: train={trainRMSE:.4f}, valid={validRMSE:.4f}, "
                   f"best={bestLoss:.4f}, sim_gap={avg_sim_gap:.4f}")
 
+        hist.append([trainLoss_total, validLoss, trainRMSE, validRMSE])
+        utils.plotHist(hist, modelName, output_dir=output_dir)
+
     print(f"\nTraining complete. Best valid RMSE: {bestLoss:.6f}")
     with open(f'{output_dir}/{modelName}_log', 'a') as f:
         print(f"\nTraining complete. Best valid RMSE: {bestLoss:.6f}", file=f)
-    utils.plotHist(hist, modelName, output_dir=output_dir)
     wandb.finish()
 
 

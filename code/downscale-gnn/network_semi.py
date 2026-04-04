@@ -292,18 +292,11 @@ def train_msg_weight(loader, model, lossFn, opt, scheduler, device, nNodes, nNod
         _batch = _batch.to(device)
         label_mask = _batch.label_mask
 
-        # Modify edge weights: discount edges FROM unlabeled nodes
+        # Modify edge weights: discount edges FROM unlabeled nodes (vectorized)
         edge_attr_mod = _batch.edge_attr.clone()
         src_nodes = _batch.edge_index[0]
-        # For each edge, if source is unlabeled → discount weight
-        batch_size = _batch.x.shape[0] // nNodes
-        for b in range(batch_size):
-            offset = b * nNodes
-            for e_idx in range(_batch.edge_index.shape[1]):
-                src = src_nodes[e_idx].item()
-                local_src = src % nNodes  # local node index within graph
-                if not label_mask[src].item():  # source is unlabeled
-                    edge_attr_mod[e_idx] *= unlabeled_discount
+        src_is_unlabeled = ~label_mask[src_nodes]  # bool mask: True if source is unlabeled
+        edge_attr_mod[src_is_unlabeled] *= unlabeled_discount
 
         _yHat = model(_batch.x, _batch.edge_index, edge_attr_mod)
 
@@ -317,6 +310,7 @@ def train_msg_weight(loader, model, lossFn, opt, scheduler, device, nNodes, nNod
         opt.zero_grad(set_to_none=True)
         _LOSS += _loss.item()
 
+        batch_size = _batch.x.shape[0] // nNodes
         _n_labeled_actual = label_mask.sum().item() // max(1, batch_size)
         _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
         _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)

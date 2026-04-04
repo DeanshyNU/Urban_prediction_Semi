@@ -277,14 +277,19 @@ def main():
             print(f"  labeled_loss={avg_labeled:.4e} | consistency_loss={avg_consistency:.4e} | "
                   f"pred_diff={avg_pred_diff:.6f}", file=f)
 
+        trainLoss_total = avg_labeled + lambda_U * avg_consistency
         wandb.log({
-            'epoch': epoch, 'train_rmse': trainRMSE, 'valid_rmse': validRMSE,
-            'labeled_loss': avg_labeled, 'consistency_loss': avg_consistency,
-            'pred_diff': avg_pred_diff, 'best_valid_rmse': min(bestLoss, validRMSE),
-            'lr': scheduler.get_last_lr()[0],
+            'epoch': epoch,
+            'train/loss': trainLoss_total,
+            'train/rmse': trainRMSE,
+            'train/labeled_loss': avg_labeled,
+            'train/consistency_loss': avg_consistency,
+            'train/pred_diff': avg_pred_diff,
+            'valid/loss': validLoss,
+            'valid/rmse': validRMSE,
+            'learning_rate': scheduler.get_last_lr()[0],
+            'best_valid_rmse': min(bestLoss, validRMSE),
         })
-
-        hist.append([avg_labeled + lambda_U * avg_consistency, validLoss])
 
         if validRMSE < bestLoss:
             bestLoss = validRMSE
@@ -292,12 +297,13 @@ def main():
                          'epoch': epoch, 'bestLoss': bestLoss}, chkptPath)
             with open(f'{output_dir}/{modelName}_log', 'a') as f:
                 print(f"  Model saved. Best valid RMSE: {bestLoss:.6f}", file=f)
+            wandb.log({'best_model_saved': True, 'best_valid_rmse': bestLoss})
 
         if epoch % 100 == 0:
             print(f"Epoch {epoch}/{nEpoch}: train={trainRMSE:.4f}, valid={validRMSE:.4f}, "
                   f"best={bestLoss:.4f}, pred_diff={avg_pred_diff:.6f}, consistency={avg_consistency:.6f}")
 
-        # Update hist plot every epoch
+        hist.append([trainLoss_total, validLoss, trainRMSE, validRMSE])
         utils.plotHist(hist, modelName, output_dir=output_dir)
 
     print(f"\nTraining complete. Best valid RMSE: {bestLoss:.6f}")

@@ -499,20 +499,18 @@ def main():
 
         wandb.log({
             'epoch': epoch,
-            'train_loss': avg_total_loss,
-            'valid_loss': validLoss,
-            'train_rmse': trainRMSE,
-            'valid_rmse': validRMSE,
+            'train/loss': avg_total_loss,
+            'train/rmse': trainRMSE,
+            'train/labeled_loss': avg_labeled_loss,
+            'train/unlabeled_loss': avg_unlabeled_loss,
+            'train/hpl_weight_mean': avg_weight_mean,
+            'train/hpl_weight_std': avg_weight_std,
+            'train/hpl_pred_diff': avg_diff_mean,
+            'valid/loss': validLoss,
+            'valid/rmse': validRMSE,
+            'learning_rate': scheduler.get_last_lr()[0],
             'best_valid_rmse': min(bestLoss, validRMSE),
-            'labeled_loss': avg_labeled_loss,
-            'unlabeled_loss': avg_unlabeled_loss,
-            'hpl_weight_mean': avg_weight_mean,
-            'hpl_weight_std': avg_weight_std,
-            'hpl_pred_diff': avg_diff_mean,
-            'lr': scheduler.get_last_lr()[0],
         })
-
-        hist.append([avg_total_loss, validLoss])
 
         # --- Save best ---
         if validRMSE < bestLoss:
@@ -532,11 +530,13 @@ def main():
             print(f"Epoch {epoch}/{nEpoch}: train={trainRMSE:.4f}, valid={validRMSE:.4f}, "
                   f"best={bestLoss:.4f}, weight_mean={avg_weight_mean:.4f}, diff={avg_diff_mean:.4f}")
 
+        hist.append([avg_total_loss, validLoss, trainRMSE, validRMSE])
+        utils.plotHist(hist, modelName, output_dir=output_dir)
+
     # --- Final ---
     print(f"\nTraining complete. Best valid RMSE: {bestLoss:.6f}")
     with open(f'{output_dir}/{modelName}_log', 'a') as f:
         print(f"\nTraining complete. Best valid RMSE: {bestLoss:.6f}", file=f)
-    utils.plotHist(hist, modelName, output_dir=output_dir)
     wandb.finish()
 
 
