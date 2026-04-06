@@ -248,7 +248,7 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
         }
 
     elif filter_mode == 'neighbor_error':
-        # Conformal Prediction: use calibration residuals from valid set to weight pseudo-labels
+        # Neighbor Error: use calibration residuals from valid set to weight pseudo-labels
         # Weight based on model's actual prediction accuracy near each unlabeled node
         K_NEIGHBORS = 5  # number of nearest labeled neighbors for local calibration
         WEIGHT_SCALE = 10.0  # controls how sharply interval width affects weight
@@ -289,7 +289,7 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
 
         # Per-labeled-node calibration residual (mean absolute error on valid set)
         per_node_residual = np.mean(np.abs(val_preds_l - val_targets_l), axis=0)  # (nNodes_labeled,)
-        print(f"  [Conformal] Per-node valid residual: min={per_node_residual.min():.4f}, "
+        print(f"  [Neighbor Error] Per-node valid residual: min={per_node_residual.min():.4f}, "
               f"max={per_node_residual.max():.4f}, mean={per_node_residual.mean():.4f}")
 
         # Step C: For each unlabeled node, compute interval width from K nearest labeled neighbors
@@ -354,11 +354,11 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
             'K_neighbors': K_NEIGHBORS,
             'weight_scale': WEIGHT_SCALE,
         }
-        print(f"  [Conformal] Interval widths: [{interval_widths.min():.4f}, {interval_widths.max():.4f}], "
+        print(f"  [Neighbor Error] Interval widths: [{interval_widths.min():.4f}, {interval_widths.max():.4f}], "
               f"mean={interval_widths.mean():.4f}")
-        print(f"  [Conformal] Weights: [{neighbor_error_weights.min():.4f}, {neighbor_error_weights.max():.4f}], "
+        print(f"  [Neighbor Error] Weights: [{neighbor_error_weights.min():.4f}, {neighbor_error_weights.max():.4f}], "
               f"mean={neighbor_error_weights.mean():.4f}, std={neighbor_error_weights.std():.4f}")
-        print(f"  [Conformal] Nodes with 0 labeled nbs: {sum(1 for n in n_labeled_nbs_list if n == 0)}")
+        print(f"  [Neighbor Error] Nodes with 0 labeled nbs: {sum(1 for n in n_labeled_nbs_list if n == 0)}")
 
     else:
         # No filtering: single forward pass, equal weights

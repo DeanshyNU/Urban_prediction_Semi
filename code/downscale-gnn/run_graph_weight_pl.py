@@ -304,6 +304,16 @@ def main():
     # Initialize weights uniformly (first epoch has no error info yet)
     node_weights = np.ones(nNodes_unlabeled) * 0.5
     node_weights_tensor = torch.FloatTensor(node_weights).to(device)
+    per_node_mae = None
+    weight_stats = None
+
+    # Get training label mask (which of the 58 labeled nodes are in training set)
+    # In spatial mode: 50 train + 8 valid; in temporal mode: all 58
+    _sample_batch = next(iter(trainLoader))
+    _train_label_mask = _sample_batch.label_mask[:nNodes].cpu().numpy()  # (nNodes,) bool
+    _train_labeled_indices = np.where(_train_label_mask[:nNodes_labeled])[0]  # indices within labeled nodes
+    n_train_labeled = len(_train_labeled_indices)
+    print(f"Training labeled nodes: {n_train_labeled}/{nNodes_labeled}")
 
     for epoch in range(nEpoch):
         model.train()
@@ -355,10 +365,13 @@ def main():
             loss_unlabeled = torch.mean(weight_expanded * unlabel_mse)
 
             # --- Laplacian loss (spatial smoothness on unaugmented forward pass) ---
-            pred_for_lap = model(_batch.x, _batch.edge_index, _batch.edge_attr)
-            pred_first = pred_for_lap[:nNodes].squeeze(-1)  # first graph in batch
-            lap_diff = pred_first[lap_edge_src] - pred_first[lap_edge_dst]
-            loss_lap = torch.mean(lap_edge_w * lap_diff ** 2)
+            if lambda_lap > 0:
+                pred_for_lap = model(_batch.x, _batch.edge_index, _batch.edge_attr)
+                pred_first = pred_for_lap[:nNodes].squeeze(-1)  # first graph in batch
+                lap_diff = pred_first[lap_edge_src] - pred_first[lap_edge_dst]
+                loss_lap = torch.mean(lap_edge_w * lap_diff ** 2)
+            else:
+                loss_lap = torch.tensor(0.0, device=device)
 
             # --- Total loss ---
             total_loss = loss_labeled + w_ulb * loss_unlabeled + lambda_lap * loss_lap
@@ -384,9 +397,15 @@ def main():
         # ========== Update graph-based weights ==========
         if epoch % weight_update_interval == 0:
             # Compute per-labeled-node error from this epoch
-            all_preds = torch.cat(labeled_preds_epoch).numpy().reshape(-1, nNodes_labeled)
-            all_truths = torch.cat(labeled_truths_epoch).numpy().reshape(-1, nNodes_labeled)
-            per_node_mae = np.mean(np.abs(all_preds - all_truths), axis=0)  # (nNodes_labeled,)
+            # In spatial mode: only 50 train labeled nodes have predictions, not all 58
+            all_preds = torch.cat(labeled_preds_epoch).numpy().reshape(-1, n_train_labeled)
+            all_truths = torch.cat(labeled_truths_epoch).numpy().reshape(-1, n_train_labeled)
+            per_train_node_mae = np.mean(np.abs(all_preds - all_truths), axis=0)  # (n_train_labeled,)
+
+            # Map back to full labeled node array (58), fill held-out nodes with mean error
+            per_node_mae = np.full(nNodes_labeled, per_train_node_mae.mean())
+            for idx, node_idx in enumerate(_train_labeled_indices):
+                per_node_mae[node_idx] = per_train_node_mae[idx]
 
             node_weights, weight_stats = compute_graph_weights(
                 per_node_mae, adj_matrix, nNodes_labeled, nNodes_unlabeled, scale=weight_scale
@@ -429,7 +448,7 @@ def main():
                   f"max={node_weights.max():.4f} | pred_diff: {avg_diff_mean:.4f}", file=f)
 
             # Detailed debug every 100 epochs + first 5
-            if epoch % 100 == 0 or epoch < 5:
+            if (epoch % 100 == 0 or epoch < 5) and per_node_mae is not None:
                 print(f"  [GW debug] per-node labeled MAE: min={per_node_mae.min():.4f}, "
                       f"max={per_node_mae.max():.4f}, mean={per_node_mae.mean():.4f}", file=f)
                 print(f"  [GW debug] estimated unlabeled error: min={weight_stats['estimated_error_min']:.4f}, "
