@@ -11,7 +11,7 @@ Usage:
 Environment variables:
   CONV_TYPE: graphconv (default), sageconv, appnp
   PRETRAINED_PATH: path to pre-trained model checkpoint
-  FILTER_MODE: none (default), mc_dropout, graph_uncertainty, conformal
+  FILTER_MODE: none (default), mc_dropout, graph_uncertainty, neighbor_error (weight by labeled neighbors' real errors)
   LAMBDA_PSEUDO: pseudo-label loss weight (default 1.0)
   UPDATE_INTERVAL: epochs between pseudo-label updates (default 30)
 """
@@ -24,7 +24,7 @@ from datetime import datetime
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device('cpu')
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
 project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-_conformal_valid_loader = None  # set by main() for conformal calibration
+_neighbor_error_valid_loader = None  # set by main() for neighbor_error calibration
 
 # Config from environment
 conv_type = os.environ.get('CONV_TYPE', 'graphconv').lower()
@@ -33,14 +33,17 @@ filter_mode = os.environ.get('FILTER_MODE', 'none').lower()  # none, mc_dropout,
 lambda_pseudo = float(os.environ.get('LAMBDA_PSEUDO', '1.0'))
 update_interval = int(os.environ.get('UPDATE_INTERVAL', '30'))
 mc_samples = int(os.environ.get('MC_SAMPLES', '10'))
+semi_mode = os.environ.get('SEMI_MODE', 'basic').lower()  # basic, laplacian
+lambda_lap = float(os.environ.get('LAMBDA_LAP', '0.1'))
 
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 job_id = os.environ.get('SLURM_JOB_ID', '')
+semi_tag = f'_{semi_mode}' if semi_mode != 'basic' else ''
 filter_tag = filter_mode if filter_mode != 'none' else 'basic'
 if job_id:
-    output_dir = os.path.join(project_root, 'log', f'self_training_{conv_type}_{filter_tag}_{timestamp}_job{job_id}')
+    output_dir = os.path.join(project_root, 'log', f'self_training_{conv_type}{semi_tag}_{filter_tag}_{timestamp}_job{job_id}')
 else:
-    output_dir = os.path.join(project_root, 'log', f'self_training_{conv_type}_{filter_tag}_{timestamp}')
+    output_dir = os.path.join(project_root, 'log', f'self_training_{conv_type}{semi_tag}_{filter_tag}_{timestamp}')
 os.makedirs(output_dir, exist_ok=True)
 
 
@@ -55,7 +58,7 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
         device: cuda/cpu
         nNodes: total nodes per graph
         nNodes_labeled: number of labeled nodes
-        filter_mode: 'none', 'mc_dropout', 'graph_uncertainty'
+        filter_mode: 'none', 'mc_dropout', 'graph_uncertainty', 'neighbor_error'
         mc_samples: number of MC Dropout forward passes
         adj_matrix: adjacency matrix for graph uncertainty
 
@@ -244,7 +247,7 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
             'spatial_scale': SPATIAL_SCALE,
         }
 
-    elif filter_mode == 'conformal':
+    elif filter_mode == 'neighbor_error':
         # Conformal Prediction: use calibration residuals from valid set to weight pseudo-labels
         # Weight based on model's actual prediction accuracy near each unlabeled node
         K_NEIGHBORS = 5  # number of nearest labeled neighbors for local calibration
@@ -265,9 +268,9 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
         pseudo_labels = np.concatenate(sample_preds_u, axis=0)
 
         # Step B: Calibrate on VALID set (model's actual residuals on unseen data)
-        # valid_loader is passed via adj_matrix argument (repurposed for conformal)
+        # valid_loader is passed via adj_matrix argument (repurposed for neighbor_error)
         # We need the valid loader - it's stored in the global scope by main()
-        valid_loader_ref = _conformal_valid_loader  # set by main() before calling
+        valid_loader_ref = _neighbor_error_valid_loader  # set by main() before calling
         val_preds_l = []
         val_targets_l = []
         with torch.no_grad():
@@ -323,10 +326,10 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
 
         # Step D: Convert interval widths to weights
         # Narrow interval → high weight, wide interval → low weight
-        conformal_weights = 1.0 / (1.0 + interval_widths * WEIGHT_SCALE)
+        neighbor_error_weights = 1.0 / (1.0 + interval_widths * WEIGHT_SCALE)
 
         # Broadcast weights to all time samples (weights are per-node, static)
-        final_weights = np.tile(conformal_weights, (pseudo_labels.shape[0], 1))
+        final_weights = np.tile(neighbor_error_weights, (pseudo_labels.shape[0], 1))
         mc_std = np.zeros_like(pseudo_labels)
 
         # Debug statistics
@@ -335,12 +338,12 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
             'interval_width_max': interval_widths.max(),
             'interval_width_mean': interval_widths.mean(),
             'interval_width_median': np.median(interval_widths),
-            'conformal_weight_min': conformal_weights.min(),
-            'conformal_weight_max': conformal_weights.max(),
-            'conformal_weight_mean': conformal_weights.mean(),
-            'conformal_weight_std': conformal_weights.std(),
-            'conformal_weight_above_05': (conformal_weights > 0.5).mean() * 100,
-            'conformal_weight_below_02': (conformal_weights < 0.2).mean() * 100,
+            'neighbor_error_weight_min': neighbor_error_weights.min(),
+            'neighbor_error_weight_max': neighbor_error_weights.max(),
+            'neighbor_error_weight_mean': neighbor_error_weights.mean(),
+            'neighbor_error_weight_std': neighbor_error_weights.std(),
+            'neighbor_error_weight_above_05': (neighbor_error_weights > 0.5).mean() * 100,
+            'neighbor_error_weight_below_02': (neighbor_error_weights < 0.2).mean() * 100,
             'per_node_residual_min': per_node_residual.min(),
             'per_node_residual_max': per_node_residual.max(),
             'per_node_residual_mean': per_node_residual.mean(),
@@ -353,8 +356,8 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
         }
         print(f"  [Conformal] Interval widths: [{interval_widths.min():.4f}, {interval_widths.max():.4f}], "
               f"mean={interval_widths.mean():.4f}")
-        print(f"  [Conformal] Weights: [{conformal_weights.min():.4f}, {conformal_weights.max():.4f}], "
-              f"mean={conformal_weights.mean():.4f}, std={conformal_weights.std():.4f}")
+        print(f"  [Conformal] Weights: [{neighbor_error_weights.min():.4f}, {neighbor_error_weights.max():.4f}], "
+              f"mean={neighbor_error_weights.mean():.4f}, std={neighbor_error_weights.std():.4f}")
         print(f"  [Conformal] Nodes with 0 labeled nbs: {sum(1 for n in n_labeled_nbs_list if n == 0)}")
 
     else:
@@ -397,16 +400,28 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
 
 def train_self_training(loader, model, lossFn, opt, scheduler, device,
                         nNodes, nNodes_labeled, pseudo_labels, pseudo_weights,
-                        lambda_pseudo, sample_offset=0):
+                        lambda_pseudo, sample_offset=0,
+                        semi_mode='basic', adj_matrix=None, lambda_lap=0.1):
     """
     Self-training: supervised loss on labeled + weighted pseudo-label loss on unlabeled.
+    Optionally includes Laplacian regularization when semi_mode='laplacian'.
     """
     model.train()
     _LOSS = 0
     _LABELED_LOSS = 0
     _PSEUDO_LOSS = 0
+    _LAP_LOSS = 0
     pred, truth = [], []
     nNodes_unlabeled = nNodes - nNodes_labeled
+
+    # Pre-compute Laplacian edges (once)
+    if semi_mode == 'laplacian' and adj_matrix is not None:
+        _adj = adj_matrix.copy()
+        np.fill_diagonal(_adj, 0)
+        _edge_src, _edge_dst = np.nonzero(_adj)
+        _edge_w = torch.FloatTensor(_adj[_edge_src, _edge_dst]).to(device)
+        _edge_src = torch.LongTensor(_edge_src).to(device)
+        _edge_dst = torch.LongTensor(_edge_dst).to(device)
 
     for _n, _batch in enumerate(loader):
         _batch = _batch.to(device)
@@ -440,8 +455,18 @@ def train_self_training(loader, model, lossFn, opt, scheduler, device,
         pseudo_diff = (_yHat_unlabeled - pl) ** 2
         pseudo_loss = (pw * pseudo_diff).mean()
 
+        # 3. Laplacian loss (optional)
+        lap_loss_val = 0
+        if semi_mode == 'laplacian' and adj_matrix is not None:
+            _yHat_first = _yHat[:nNodes].squeeze(-1)
+            diff = _yHat_first[_edge_src] - _yHat_first[_edge_dst]
+            lap_loss = torch.mean(_edge_w * diff ** 2)
+            lap_loss_val = lap_loss.item()
+        else:
+            lap_loss = 0
+
         # Total loss
-        total_loss = labeled_loss + lambda_pseudo * pseudo_loss
+        total_loss = labeled_loss + lambda_pseudo * pseudo_loss + lambda_lap * lap_loss
 
         total_loss.backward(retain_graph=False)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -451,6 +476,7 @@ def train_self_training(loader, model, lossFn, opt, scheduler, device,
         _LOSS += total_loss
         _LABELED_LOSS += labeled_loss.item()
         _PSEUDO_LOSS += pseudo_loss.item()
+        _LAP_LOSS += lap_loss_val
 
         # Record labeled predictions for RMSE
         _pred = _yHat_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
@@ -463,7 +489,8 @@ def train_self_training(loader, model, lossFn, opt, scheduler, device,
     _RMSE = utils.RMSE(truth, pred)
     n_batches = _n + 1
     return ((_LOSS / n_batches).item(), _RMSE, truth, pred,
-            _LABELED_LOSS / n_batches, _PSEUDO_LOSS / n_batches)
+            _LABELED_LOSS / n_batches, _PSEUDO_LOSS / n_batches,
+            _LAP_LOSS / n_batches)
 
 
 def main():
@@ -482,9 +509,9 @@ def main():
     os.environ['OUTPUT_DIR'] = output_dir
     trainLoader, validLoader, metadata, _ = data_semi.dataGen(dataParam, path, n_unlabeled=n_unlabeled)
 
-    # Make valid_loader accessible for conformal calibration
-    global _conformal_valid_loader
-    _conformal_valid_loader = validLoader
+    # Make valid_loader accessible for neighbor_error calibration
+    global _neighbor_error_valid_loader
+    _neighbor_error_valid_loader = validLoader
 
     nNodes = metadata['nNodes']
     nNodes_labeled = metadata['nNodes_labeled']
@@ -530,7 +557,7 @@ def main():
     bestLoss = np.inf
     hist = []
 
-    modelName = f'geoEmbed_{dataParam["geoMethod"]}_{conv_type}_selftraining_{filter_tag}_{n_unlabeled}unlabeled'
+    modelName = f'geoEmbed_{dataParam["geoMethod"]}_{conv_type}_selftraining{semi_tag}_{filter_tag}_{n_unlabeled}unlabeled'
     wandb_name = f'{modelName}_job{job_id}' if job_id else modelName
     chkptPath = f'{output_dir}/{modelName}.pt'
 
@@ -543,6 +570,8 @@ def main():
             **dataParam,
             **modelParam,
             'method': 'self-training',
+            'semi_mode': semi_mode,
+            'lambda_lap': lambda_lap if semi_mode == 'laplacian' else 0,
             'filter_mode': filter_mode,
             'lambda_pseudo': lambda_pseudo,
             'update_interval': update_interval,
@@ -559,6 +588,9 @@ def main():
     with open(f'{output_dir}/{modelName}_log', 'w') as f:
         print("Self-training configuration:", file=f)
         print(f"  Pretrained model: {pretrained_path}", file=f)
+        print(f"  Semi mode: {semi_mode}", file=f)
+        if semi_mode == 'laplacian':
+            print(f"  Lambda lap: {lambda_lap}", file=f)
         print(f"  Filter mode: {filter_mode}", file=f)
         print(f"  Lambda pseudo: {lambda_pseudo}", file=f)
         print(f"  Update interval: {update_interval} epochs", file=f)
@@ -674,10 +706,11 @@ def main():
             current_lambda = lambda_pseudo
 
         # Train
-        trainLoss, trainRMSE, _, _, labeled_loss, pseudo_loss = train_self_training(
+        trainLoss, trainRMSE, _, _, labeled_loss, pseudo_loss, lap_loss = train_self_training(
             trainLoader, model, lossFn, opt, scheduler, device,
             nNodes, nNodes_labeled, pseudo_labels, pseudo_weights,
-            current_lambda
+            current_lambda,
+            semi_mode=semi_mode, adj_matrix=adj_matrix, lambda_lap=lambda_lap
         )
 
         # Validate (only on labeled nodes, same as semi-supervised)
@@ -687,16 +720,19 @@ def main():
 
         # Log
         with open(f'{output_dir}/{modelName}_log', 'a') as f:
-            print(f"Epoch {epoch}: loss {trainLoss:.4e}/{validLoss:.4e}; "
-                  f"RMSE {trainRMSE[0]:.3f}/{validRMSE[0]:.3f}; "
-                  f"LR {scheduler.get_last_lr()[0]:.6f}; lambda={current_lambda:.3f}", file=f)
+            log_line = (f"Epoch {epoch}: loss {trainLoss:.4e}/{validLoss:.4e}; "
+                        f"RMSE {trainRMSE[0]:.3f}/{validRMSE[0]:.3f}; "
+                        f"LR {scheduler.get_last_lr()[0]:.6f}; lambda={current_lambda:.3f}")
+            if semi_mode == 'laplacian':
+                log_line += f" | lap_loss={lap_loss:.4e}"
+            print(log_line, file=f)
             print(f"  labeled_loss={labeled_loss:.4e} | pseudo_loss={pseudo_loss:.4e}", file=f)
             print(f"  RMSE std: {trainRMSE[1]:.3f}/{validRMSE[1]:.3f}; "
                   f"min: {trainRMSE[2]:.3f}/{validRMSE[2]:.3f}; "
                   f"max: {trainRMSE[3]:.3f}/{validRMSE[3]:.3f};", file=f)
 
         # W&B
-        wandb.log({
+        wandb_dict = {
             'epoch': epoch,
             'train/loss': trainLoss,
             'train/rmse': trainRMSE[0],
@@ -713,7 +749,10 @@ def main():
             'valid/rmse_max': validRMSE[3],
             'learning_rate': scheduler.get_last_lr()[0],
             'best_valid_rmse': bestLoss,
-        })
+        }
+        if semi_mode == 'laplacian':
+            wandb_dict['train/lap_loss'] = lap_loss
+        wandb.log(wandb_dict)
 
         # Save best model
         if validRMSE[0] < bestLoss:
