@@ -77,15 +77,15 @@ def _drop_edges(edge_index, edge_attr, drop_rate):
 
 
 def structured_augment_mt(x, edge_index, edge_attr):
-    """MT equal-strength augmentation: keep Tair, mask 2 med/low groups,
-    mask 1 timestep, mask 20% GeoEmbed, drop 20% edges."""
+    """MT equal-strength augmentation (tuned): keep Tair+Tskin, mask 1 med/low group,
+    mask 1 time step, mask 10% GeoEmbed, drop 10% edges."""
     total_dim = x.size(1)
     layout = _get_feature_layout(total_dim)
     x_aug = x.clone()
 
-    # Mask 2 medium/low variable groups (keep Tair always)
-    candidates = ['Tskin', 'Tsoil', 'Humid', 'Irrad', 'WindX', 'WindY', 'CLMS']
-    chosen = _random.sample(candidates, 2)
+    # Mask 1 medium/low variable group (keep Tair+Tskin always)
+    candidates = ['Humid', 'Irrad', 'WindX', 'WindY', 'CLMS']
+    chosen = _random.sample(candidates, 1)
     wrf_vars = [v for v in chosen if v != 'CLMS']
     if wrf_vars:
         x_aug[:, _build_wrf_var_indices(wrf_vars)] = 0.0
@@ -94,16 +94,16 @@ def structured_augment_mt(x, edge_index, edge_attr):
         x_aug[:, s:e] = 0.0
 
     # Mask 1 non-current timestep
-    step_to_mask = _random.choice([1, 2, 3, 4])  # 0=current, skip it
+    step_to_mask = _random.choice([1, 2, 3, 4])
     x_aug[:, _build_wrf_timestep_indices(step_to_mask)] = 0.0
 
-    # Mask 20% GeoEmbed
+    # Mask 10% GeoEmbed
     geo_start, geo_end = layout['geo']
-    geo_mask = torch.rand(layout['geo_dim'], device=x.device) > 0.20
+    geo_mask = torch.rand(layout['geo_dim'], device=x.device) > 0.10
     x_aug[:, geo_start:geo_end] *= geo_mask.float().unsqueeze(0)
 
-    # Drop 20% edges
-    edge_index_aug, edge_attr_aug = _drop_edges(edge_index, edge_attr, drop_rate=0.20)
+    # Drop 10% edges
+    edge_index_aug, edge_attr_aug = _drop_edges(edge_index, edge_attr, drop_rate=0.10)
     return x_aug, edge_index_aug, edge_attr_aug
 
 

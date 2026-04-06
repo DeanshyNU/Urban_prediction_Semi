@@ -146,15 +146,14 @@ def structured_augment_weak(x, edge_index, edge_attr):
 
 
 def structured_augment_strong(x, edge_index, edge_attr):
-    """Strong augmentation: keep Tair only, mask 2-3 med/low groups, mask 1 time step,
-    mask 30% GeoEmbed, drop 25% edges."""
+    """Strong augmentation (tuned): keep Tair+Tskin, mask 1 med/low group,
+    mask 1 time step, mask 10% GeoEmbed, drop 10% edges."""
     total_dim = x.size(1)
     layout = _get_feature_layout(total_dim)
     x_aug = x.clone()
 
     candidates = ['Humid', 'Irrad', 'WindX', 'WindY', 'CLMS']
-    n_mask = _random.choice([2, 3])
-    chosen_groups = _random.sample(candidates, min(n_mask, len(candidates)))
+    chosen_groups = _random.sample(candidates, 1)
     wrf_vars = [v for v in chosen_groups if v != 'CLMS']
     if wrf_vars:
         x_aug[:, _build_wrf_var_indices(wrf_vars)] = 0.0
@@ -166,10 +165,10 @@ def structured_augment_strong(x, edge_index, edge_attr):
     x_aug[:, _build_wrf_timestep_indices(step_to_mask)] = 0.0
 
     geo_start, geo_end = layout['geo']
-    geo_mask = torch.rand(layout['geo_dim'], device=x.device) > 0.30
+    geo_mask = torch.rand(layout['geo_dim'], device=x.device) > 0.10
     x_aug[:, geo_start:geo_end] *= geo_mask.float().unsqueeze(0)
 
-    edge_index_aug, edge_attr_aug = _drop_edges(edge_index, edge_attr, drop_rate=0.25)
+    edge_index_aug, edge_attr_aug = _drop_edges(edge_index, edge_attr, drop_rate=0.10)
     return x_aug, edge_index_aug, edge_attr_aug
 
 
@@ -196,7 +195,7 @@ def main():
 
     # ========== Hyperparameters ==========
     nEpoch = 5000
-    w_ulb = float(os.environ.get('W_ULB', 10.0))       # unlabeled loss weight (official default: 10)
+    w_ulb = float(os.environ.get('W_ULB', 1.0))         # unlabeled loss weight (reduced from 10 to avoid NaN)
     bilevel_freq = int(os.environ.get('BILEVEL_FREQ', 5))  # bi-level every N iterations
     weak_noise = 0.05
     strong_noise = 0.2
