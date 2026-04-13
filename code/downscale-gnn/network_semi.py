@@ -1,6 +1,26 @@
 import torch,os,utils
 import numpy as np
 from torch_geometric.nn import GraphConv, SAGEConv, APPNP
+# -----------------Edge Weight Network for Adaptive Laplacian---------------------------
+class EdgeWeightNet(torch.nn.Module):
+    """
+    Learns per-edge smoothness weights for Adaptive Laplacian.
+    Input: concatenation of node pair hidden representations [h_i, h_j]
+    Output: scalar weight α_ij ∈ (0, 1) via sigmoid
+    """
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim * 2, hidden_dim),
+            torch.nn.PReLU(hidden_dim),
+            torch.nn.Linear(hidden_dim, 1),
+            torch.nn.Sigmoid()
+        )
+
+    def forward(self, h_i, h_j):
+        """h_i, h_j: (num_edges, hidden_dim) → (num_edges, 1)"""
+        return self.net(torch.cat([h_i, h_j], dim=-1))
+
 # -----------------Construct GNN model---------------------------
 class GNN(torch.nn.Module):
 
@@ -37,13 +57,14 @@ class GNN(torch.nn.Module):
             _inputChannel = _HLD
             _outputChannel = modelPara['oDim'] if _n == self.nMLPLayers-1 else _HLD
             _decoder.append(torch.nn.Linear(_inputChannel,_outputChannel))
-            _decoder.append(torch.nn.PReLU(_outputChannel))
+            if _n < self.nMLPLayers - 1:  # [BugFix] 最后一层不加激活函数（回归输出应无约束）
+                _decoder.append(torch.nn.PReLU(_outputChannel))
 
         self.encoder = torch.nn.ModuleList(_encoder)
         self.processor = torch.nn.ModuleList(_processor)
         self.decoder = torch.nn.ModuleList(_decoder)
 
-    def forward(self, x, edgeIdx, edgeAttr):
+    def forward(self, x, edgeIdx, edgeAttr, return_hidden=False):
         for _f in self.encoder:
             x = _f(x)
         for _n, _f in enumerate(self.processor):
@@ -55,8 +76,11 @@ class GNN(torch.nn.Module):
                 x = _f(x, edgeIdx, edgeAttr)
             else:
                 x = _f(x)
+        h = x  # hidden representation after GNN, before decoder
         for _f in self.decoder:
             x = _f(x)
+        if return_hidden:
+            return x, h
         return x
     
 # 全局标志，确保半监督学习验证只打印一次
@@ -162,13 +186,22 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes,nNodes_labeled):
             _verification_printed = True
         
         _loss = lossFn(_yHat_labeled, _y_labeled)
+
+        # [Debug] 首个batch检查预测和目标范围
+        if _n == 0 and not _verification_printed:
+            with torch.no_grad():
+                _p_min, _p_max = _yHat.min().item(), _yHat.max().item()
+                _t_min, _t_max = _batch.y[label_mask].min().item(), _batch.y[label_mask].max().item()
+                print(f"  [Debug] Epoch start: pred range=[{_p_min:.4f}, {_p_max:.4f}], "
+                      f"target range=[{_t_min:.4f}, {_t_max:.4f}], loss={_loss.item():.4e}")
+
         _loss.backward(retain_graph=False)
         # ✅ 添加梯度裁剪，防止梯度爆炸
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         opt.step()
         opt.zero_grad(set_to_none=True)
-        _LOSS += _loss
-        
+        _LOSS += _loss.item()  # [BugFix] 用.item()提取标量，避免GPU内存泄漏
+
         # 只记录有标签节点的预测
         # spatial模式下每个图的labeled数可能不等于nNodes_labeled(58)
         _n_labeled_actual = label_mask.sum().item() // max(1, _batch.x.shape[0] // nNodes)
@@ -179,7 +212,7 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes,nNodes_labeled):
     scheduler.step()
     truth, pred = np.array(truth), np.array(pred)
     _RMSE = utils.RMSE(truth,pred)
-    return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
+    return (_LOSS/(_n+1)), _RMSE, truth, pred
 
 def test(loader,model,lossFn,device,nNodes,nNodes_labeled):
     """
@@ -188,28 +221,28 @@ def test(loader,model,lossFn,device,nNodes,nNodes_labeled):
     model.eval()
     _LOSS = 0
     pred,truth = [],[]
-    for _n, _batch in enumerate(loader):
-        _batch = _batch.to(device)
-        _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
-        
-        # 只在有标签节点上计算损失
-        label_mask = _batch.label_mask
-        _yHat_labeled = _yHat[label_mask]
-        _y_labeled = _batch.y[label_mask]
-        
-        _loss = lossFn(_yHat_labeled, _y_labeled)
-        _LOSS += _loss
-        
-        # 只记录有标签节点的预测
-        # spatial模式下每个图的labeled数可能不等于nNodes_labeled(58)
-        _n_labeled_actual = label_mask.sum().item() // max(1, _batch.x.shape[0] // nNodes)
-        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
-        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
-        pred += list(_pred.cpu().detach().numpy())
-        truth += list(_truth.cpu().detach().numpy())
+    with torch.no_grad():  # [BugFix] 添加no_grad，避免验证时计算梯度浪费GPU内存
+        for _n, _batch in enumerate(loader):
+            _batch = _batch.to(device)
+            _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
+
+            # 只在有标签节点上计算损失
+            label_mask = _batch.label_mask
+            _yHat_labeled = _yHat[label_mask]
+            _y_labeled = _batch.y[label_mask]
+
+            _loss = lossFn(_yHat_labeled, _y_labeled)
+            _LOSS += _loss.item()  # [BugFix] 用.item()提取标量
+
+            # 只记录有标签节点的预测
+            _n_labeled_actual = label_mask.sum().item() // max(1, _batch.x.shape[0] // nNodes)
+            _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+            _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+            pred += list(_pred.cpu().numpy())
+            truth += list(_truth.cpu().numpy())
     truth, pred = np.array(truth), np.array(pred)
     _RMSE = utils.RMSE(truth,pred)
-    return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
+    return (_LOSS/(_n+1)), _RMSE, truth, pred
 
 
 # ==================== Enhanced Semi-supervised Training Modes ====================
@@ -227,16 +260,12 @@ def train_laplacian(loader, model, lossFn, opt, scheduler, device, nNodes, nNode
     pred, truth = [], []
 
     # Pre-compute edge list from adjacency (once per epoch)
-    edge_src, edge_dst, edge_w = [], [], []
-    for i in range(adj_matrix.shape[0]):
-        for j in range(i+1, adj_matrix.shape[1]):
-            if adj_matrix[i, j] > 0:
-                edge_src.append(i)
-                edge_dst.append(j)
-                edge_w.append(adj_matrix[i, j])
-    edge_src = torch.LongTensor(edge_src).to(device)
-    edge_dst = torch.LongTensor(edge_dst).to(device)
-    edge_w = torch.FloatTensor(edge_w).to(device)
+    _adj = adj_matrix.copy()
+    np.fill_diagonal(_adj, 0)
+    _edge_src, _edge_dst = np.nonzero(_adj)
+    _edge_w = torch.FloatTensor(_adj[_edge_src, _edge_dst]).to(device)
+    _edge_src = torch.LongTensor(_edge_src).to(device)
+    _edge_dst = torch.LongTensor(_edge_dst).to(device)
 
     for _n, _batch in enumerate(loader):
         _batch = _batch.to(device)
@@ -249,13 +278,24 @@ def train_laplacian(loader, model, lossFn, opt, scheduler, device, nNodes, nNode
         # Supervised loss
         sup_loss = lossFn(_yHat_labeled, _y_labeled)
 
-        # Graph Laplacian loss (on ALL nodes in first graph of batch)
+        # [BugFix] Graph Laplacian loss on ALL graphs in batch (not just first)
         batch_size = _batch.x.shape[0] // nNodes
-        _yHat_first = _yHat[:nNodes].squeeze(-1)  # first graph
-        diff = _yHat_first[edge_src] - _yHat_first[edge_dst]
-        lap_loss = torch.mean(edge_w * diff ** 2)
+        _yHat_all = _yHat.squeeze(-1).reshape(batch_size, nNodes)  # (batch_size, nNodes)
+        lap_loss = 0
+        for g in range(batch_size):
+            diff = _yHat_all[g][_edge_src] - _yHat_all[g][_edge_dst]
+            lap_loss = lap_loss + torch.mean(_edge_w * diff ** 2)
+        lap_loss = lap_loss / batch_size
 
         total_loss = sup_loss + lambda_lap * lap_loss
+
+        # [Debug] Shape and batch size verification (first batch only)
+        if _n == 0:
+            assert _batch.x.shape[0] % nNodes == 0, \
+                f"Batch nodes {_batch.x.shape[0]} not divisible by nNodes {nNodes}"
+            assert _yHat_all.shape == (batch_size, nNodes), \
+                f"yHat reshape failed: {_yHat_all.shape} vs expected ({batch_size}, {nNodes})"
+
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         opt.step()
@@ -275,6 +315,177 @@ def train_laplacian(loader, model, lossFn, opt, scheduler, device, nNodes, nNode
     _RMSE = utils.RMSE(truth, pred)
     n_batches = _n + 1
     return (_LOSS / n_batches), _RMSE, truth, pred, _LAP_LOSS / n_batches
+
+
+def train_adaptive_laplacian(loader, model, edge_weight_net, lossFn, opt, scheduler, device,
+                             nNodes, nNodes_labeled, adj_matrix, lambda_lap=0.1):
+    """
+    Adaptive Laplacian: learns per-edge smoothness weights.
+    L = L_supervised + lambda_lap * Σ α_ij * w_ij * (pred_i - pred_j)²
+    where α_ij = EdgeWeightNet(h_i, h_j) ∈ (0,1) decides which edges should be smooth.
+
+    This allows the model to suppress smoothness at urban/rural boundaries
+    while enforcing it in homogeneous areas.
+    """
+    model.train()
+    edge_weight_net.train()
+    _LOSS = 0
+    _LAP_LOSS = 0
+    _ALPHA_MEAN = 0
+    _ALPHA_STD = 0
+    pred, truth = [], []
+
+    # Pre-compute edge list from adjacency (once per epoch)
+    _adj = adj_matrix.copy()
+    np.fill_diagonal(_adj, 0)
+    _edge_src, _edge_dst = np.nonzero(_adj)
+    _edge_w = torch.FloatTensor(_adj[_edge_src, _edge_dst]).to(device)
+    _edge_src = torch.LongTensor(_edge_src).to(device)
+    _edge_dst = torch.LongTensor(_edge_dst).to(device)
+
+    for _n, _batch in enumerate(loader):
+        _batch = _batch.to(device)
+        _yHat, _hidden = model(_batch.x, _batch.edge_index, _batch.edge_attr, return_hidden=True)
+
+        label_mask = _batch.label_mask
+        _yHat_labeled = _yHat[label_mask]
+        _y_labeled = _batch.y[label_mask]
+
+        # Supervised loss
+        sup_loss = lossFn(_yHat_labeled, _y_labeled)
+
+        # [BugFix] Adaptive Laplacian loss on ALL graphs in batch
+        batch_size = _batch.x.shape[0] // nNodes
+        _yHat_all = _yHat.squeeze(-1).reshape(batch_size, nNodes)
+        _h_all = _hidden.reshape(batch_size, nNodes, -1)
+
+        lap_loss = 0
+        alpha_sum = None
+        for g in range(batch_size):
+            h_src = _h_all[g][_edge_src]
+            h_dst = _h_all[g][_edge_dst]
+            alpha_g = edge_weight_net(h_src, h_dst).squeeze(-1)
+            diff = _yHat_all[g][_edge_src] - _yHat_all[g][_edge_dst]
+            lap_loss = lap_loss + torch.mean(alpha_g * _edge_w * diff ** 2)
+            alpha_sum = alpha_g if alpha_sum is None else alpha_sum + alpha_g
+        lap_loss = lap_loss / batch_size
+        alpha = alpha_sum / batch_size  # average alpha for logging
+
+        # Entropy regularization: encourage α to be decisive (not all ~0.5)
+        entropy_reg = -torch.mean(alpha * torch.log(alpha + 1e-8) +
+                                  (1 - alpha) * torch.log(1 - alpha + 1e-8))
+
+        total_loss = sup_loss + lambda_lap * lap_loss + 0.01 * entropy_reg
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(edge_weight_net.parameters(), max_norm=1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+
+        _LOSS += total_loss.item()
+        _LAP_LOSS += lap_loss.item()
+        _ALPHA_MEAN += alpha.mean().item()
+        _ALPHA_STD += alpha.std().item()
+
+        _n_labeled_actual = label_mask.sum().item() // max(1, batch_size)
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        pred += list(_pred.cpu().detach().numpy())
+        truth += list(_truth.cpu().detach().numpy())
+
+    scheduler.step()
+    truth, pred = np.array(truth), np.array(pred)
+    _RMSE = utils.RMSE(truth, pred)
+    n_batches = _n + 1
+    stats = {
+        'lap_loss': _LAP_LOSS / n_batches,
+        'alpha_mean': _ALPHA_MEAN / n_batches,
+        'alpha_std': _ALPHA_STD / n_batches,
+    }
+    return (_LOSS / n_batches), _RMSE, truth, pred, stats
+
+
+def train_residual_laplacian(loader, model, lossFn, opt, scheduler, device, nNodes, nNodes_labeled,
+                             adj_matrix, lambda_lap=0.1):
+    """
+    Residual Laplacian regularization.
+    L = L_supervised + lambda_lap * Σ w_ij * (residual_i - residual_j)²
+    where residual = pred - WRF_T2 (the model's correction to WRF).
+
+    Physical motivation: the urban heat island effect (correction to WRF background)
+    should vary smoothly in space. Unlike standard Laplacian which forces absolute
+    temperature predictions to be similar, this only smooths the UHI correction,
+    allowing different WRF backgrounds for neighboring nodes.
+    """
+    model.train()
+    _LOSS = 0
+    _LAP_LOSS = 0
+    _RESIDUAL_STATS = {'mean': 0, 'std': 0}
+    pred, truth = [], []
+
+    # Pre-compute edge list from adjacency (once per epoch)
+    _adj = adj_matrix.copy()
+    np.fill_diagonal(_adj, 0)
+    _edge_src, _edge_dst = np.nonzero(_adj)
+    _edge_w = torch.FloatTensor(_adj[_edge_src, _edge_dst]).to(device)
+    _edge_src = torch.LongTensor(_edge_src).to(device)
+    _edge_dst = torch.LongTensor(_edge_dst).to(device)
+
+    for _n, _batch in enumerate(loader):
+        _batch = _batch.to(device)
+        _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
+
+        label_mask = _batch.label_mask
+        _yHat_labeled = _yHat[label_mask]
+        _y_labeled = _batch.y[label_mask]
+
+        # Supervised loss
+        sup_loss = lossFn(_yHat_labeled, _y_labeled)
+
+        # [BugFix] Residual Laplacian loss on ALL graphs in batch
+        batch_size = _batch.x.shape[0] // nNodes
+        _yHat_all = _yHat.squeeze(-1).reshape(batch_size, nNodes)
+        _wrf_t2_all = _batch.wrf_t2.squeeze(-1).reshape(batch_size, nNodes)
+
+        lap_loss = 0
+        _res_mean_sum = 0
+        _res_std_sum = 0
+        for g in range(batch_size):
+            residual_g = _yHat_all[g] - _wrf_t2_all[g]
+            diff = residual_g[_edge_src] - residual_g[_edge_dst]
+            lap_loss = lap_loss + torch.mean(_edge_w * diff ** 2)
+            with torch.no_grad():
+                _res_mean_sum += residual_g.mean().item()
+                _res_std_sum += residual_g.std().item()
+        lap_loss = lap_loss / batch_size
+
+        total_loss = sup_loss + lambda_lap * lap_loss
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+
+        _LOSS += total_loss.item()
+        _LAP_LOSS += lap_loss.item()
+        _RESIDUAL_STATS['mean'] += _res_mean_sum / batch_size
+        _RESIDUAL_STATS['std'] += _res_std_sum / batch_size
+
+        _n_labeled_actual = label_mask.sum().item() // max(1, batch_size)
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        pred += list(_pred.cpu().detach().numpy())
+        truth += list(_truth.cpu().detach().numpy())
+
+    scheduler.step()
+    truth, pred = np.array(truth), np.array(pred)
+    _RMSE = utils.RMSE(truth, pred)
+    n_batches = _n + 1
+    stats = {
+        'lap_loss': _LAP_LOSS / n_batches,
+        'residual_mean': _RESIDUAL_STATS['mean'] / n_batches,
+        'residual_std': _RESIDUAL_STATS['std'] / n_batches,
+    }
+    return (_LOSS / n_batches), _RMSE, truth, pred, stats
 
 
 def train_msg_weight(loader, model, lossFn, opt, scheduler, device, nNodes, nNodes_labeled,

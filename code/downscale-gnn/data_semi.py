@@ -520,13 +520,60 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
 
     # ======================== Normalize WRF & CLMS ========================
     print("Normalizing features...")
+    norm_mode = os.environ.get('NORM_MODE', 'per_station').lower()
     cfd_labeled_norm, cfd_off, cfd_scl = utils.MinMax(cfd_labeled.copy())
     clms_labeled_norm, clms_off, clms_scl = utils.MinMax(clms_labeled.copy())
-    targets_norm, tgt_off, tgt_scl = utils.MinMax(targets_labeled.copy())
 
-    # Normalize unlabeled independently
-    cfd_unlabeled_norm, _, _ = utils.MinMax(cfd_unlabeled.copy())
-    clms_unlabeled_norm, _, _ = utils.MinMax(clms_unlabeled.copy())
+    if norm_mode == 'global':
+        # Global normalization: all stations share one min/max → cross-station comparable
+        _tgt_global_min = targets_labeled.min()
+        _tgt_global_max = targets_labeled.max()
+        _tgt_global_scl = _tgt_global_max - _tgt_global_min
+        if _tgt_global_scl == 0:
+            _tgt_global_scl = 1.0
+        targets_norm = (targets_labeled - _tgt_global_min) / _tgt_global_scl
+        tgt_off = np.full(nNodes_labeled, _tgt_global_min)
+        tgt_scl = np.full(nNodes_labeled, _tgt_global_scl)
+        print(f"  Target normalization: GLOBAL (min={_tgt_global_min:.2f}, max={_tgt_global_max:.2f})")
+    else:
+        # Per-station normalization (default, backward compatible)
+        targets_norm, tgt_off, tgt_scl = utils.MinMax(targets_labeled.copy())
+        _tgt_global_min = targets_labeled.min()
+        _tgt_global_max = targets_labeled.max()
+        _tgt_global_scl = _tgt_global_max - _tgt_global_min
+        if _tgt_global_scl == 0:
+            _tgt_global_scl = 1.0
+        print(f"  Target normalization: PER-STATION")
+
+    # Global-normalized targets (always computed, for GSR)
+    targets_global_norm = (targets_labeled - _tgt_global_min) / _tgt_global_scl
+
+    # WRF T2 in °C (channel 0, convert K→°C) with same global scale as targets
+    # For residual GSR: Δ = target - WRF_T2, both in same normalization
+    wrf_t2_labeled_celsius = cfd_labeled[:, :, 0] - 273.15  # (T, nL) in °C
+    wrf_t2_unlabeled_celsius = cfd_unlabeled[:, :, 0] - 273.15  # (T, nU) in °C
+    # [Debug] Verify WRF channel 0 is temperature (should be reasonable °C range)
+    assert -50 < wrf_t2_labeled_celsius.min() and wrf_t2_labeled_celsius.max() < 60, \
+        f"WRF channel 0 may not be T2: range [{wrf_t2_labeled_celsius.min():.1f}, {wrf_t2_labeled_celsius.max():.1f}]°C"
+    wrf_t2_labeled_gnorm = (wrf_t2_labeled_celsius - _tgt_global_min) / _tgt_global_scl
+    wrf_t2_unlabeled_gnorm = (wrf_t2_unlabeled_celsius - _tgt_global_min) / _tgt_global_scl
+    print(f"  WRF T2 (°C): labeled [{wrf_t2_labeled_celsius.min():.1f}, {wrf_t2_labeled_celsius.max():.1f}], "
+          f"unlabeled [{wrf_t2_unlabeled_celsius.min():.1f}, {wrf_t2_unlabeled_celsius.max():.1f}]")
+    # [Debug] Residual check: target - WRF_T2 should be small
+    _delta_check = targets_global_norm - wrf_t2_labeled_gnorm
+    print(f"  [Debug] Residual (target-WRF_T2) gnorm: mean={_delta_check.mean():.4f}, "
+          f"std={_delta_check.std():.4f}, range=[{_delta_check.min():.4f}, {_delta_check.max():.4f}]")
+
+    # [BugFix] Normalize unlabeled using LABELED parameters (not independently)
+    # This ensures same physical value → same normalized value for both labeled & unlabeled nodes
+    cfd_unlabeled_norm = (cfd_unlabeled - cfd_off) / (cfd_scl + 1e-8)
+    cfd_unlabeled_norm = np.clip(cfd_unlabeled_norm, 0.0, 1.0)
+    clms_unlabeled_norm = (clms_unlabeled - clms_off) / (clms_scl + 1e-8)
+    clms_unlabeled_norm = np.clip(clms_unlabeled_norm, 0.0, 1.0)
+    print(f"  [BugFix] Unlabeled WRF/CLMS normalized using labeled parameters (not independently)")
+    # [Debug] Verify normalization consistency
+    print(f"  [Debug] WRF norm range: labeled=[{cfd_labeled_norm.min():.3f}, {cfd_labeled_norm.max():.3f}], "
+          f"unlabeled=[{cfd_unlabeled_norm.min():.3f}, {cfd_unlabeled_norm.max():.3f}]")
 
     # ======================== Build unified graph ========================
     print("Building unified graph (labeled + unlabeled)...")
@@ -596,7 +643,7 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     # np.fill_diagonal(Adj, 0)
     # assert np.allclose(Adj, Adj.T)
 
-    # Edge statistics
+    # Edge statistics (before edge mode filtering)
     n_ll = int(np.sum(Adj[:nNodes_labeled, :nNodes_labeled] > 0) // 2)
     n_uu = int(np.sum(Adj[nNodes_labeled:, nNodes_labeled:] > 0) // 2)
     n_lu = int(np.sum(Adj[:nNodes_labeled, nNodes_labeled:] > 0))
@@ -604,6 +651,53 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     density = total_edges / (nNodes_total * (nNodes_total - 1) / 2) * 100
     print(f"  Graph: {nNodes_total} nodes, {total_edges*2} edges, density={density:.1f}%")
     print(f"  L-L={n_ll}, U-U={n_uu}, L-U={n_lu} (unified thres={thres})")
+
+    # Edge mode: optionally remove or discount UU edges
+    edge_mode = os.environ.get('EDGE_MODE', 'all').lower()
+    uu_discount = float(os.environ.get('UU_DISCOUNT', '0.1'))
+    if edge_mode == 'no_uu':
+        # Remove all U-U edges, keep only L-L and L-U
+        Adj[nNodes_labeled:, nNodes_labeled:] = 0.0
+        total_after = int(np.sum(Adj > 0) // 2)
+        density_after = total_after / (nNodes_total * (nNodes_total - 1) / 2) * 100
+        print(f"  [EDGE_MODE=no_uu] Removed {n_uu} U-U edges")
+        print(f"  After: L-L={n_ll}, U-U=0, L-U={n_lu}, total={total_after}, density={density_after:.1f}%")
+    elif edge_mode == 'discount_uu':
+        # Discount U-U edges by a factor, keep L-L and L-U unchanged
+        Adj[nNodes_labeled:, nNodes_labeled:] *= uu_discount
+        n_uu_after = int(np.sum(Adj[nNodes_labeled:, nNodes_labeled:] > 0) // 2)
+        total_after = int(np.sum(Adj > 0) // 2)
+        density_after = total_after / (nNodes_total * (nNodes_total - 1) / 2) * 100
+        print(f"  [EDGE_MODE=discount_uu] U-U edges multiplied by {uu_discount}")
+        print(f"  After: L-L={n_ll}, U-U={n_uu_after}, L-U={n_lu}, total={total_after}, density={density_after:.1f}%")
+    elif edge_mode in ('block_no_uu', 'block_discount_uu'):
+        # Block-wise thresholds: rebuild LL with lower threshold, keep LU, handle UU
+        thres_ll = float(os.environ.get('THRES_LL', '0.1'))
+        thres_lu = float(os.environ.get('THRES_LU', '0.35'))
+        # Rebuild LL block with lower threshold
+        Adj_ll_new = build_adj_matrix(Map_labeled, SM_labeled, thres_ll)
+        np.fill_diagonal(Adj_ll_new, 0)
+        Adj[:nNodes_labeled, :nNodes_labeled] = Adj_ll_new
+        # Rebuild LU block with its own threshold
+        Map_cross = np.vstack([Map_labeled, Map_unlabeled])
+        SM_cross = np.vstack([SM_labeled, SM_unlabeled])
+        Adj_cross_full = build_adj_matrix(Map_cross, SM_cross, thres_lu)
+        np.fill_diagonal(Adj_cross_full, 0)
+        Adj[:nNodes_labeled, nNodes_labeled:] = Adj_cross_full[:nNodes_labeled, nNodes_labeled:]
+        Adj[nNodes_labeled:, :nNodes_labeled] = Adj_cross_full[nNodes_labeled:, :nNodes_labeled]
+        # Handle UU
+        if edge_mode == 'block_no_uu':
+            Adj[nNodes_labeled:, nNodes_labeled:] = 0.0
+        elif edge_mode == 'block_discount_uu':
+            Adj[nNodes_labeled:, nNodes_labeled:] *= uu_discount
+        # Stats
+        n_ll_new = int(np.sum(Adj[:nNodes_labeled, :nNodes_labeled] > 0) // 2)
+        n_uu_new = int(np.sum(Adj[nNodes_labeled:, nNodes_labeled:] > 0) // 2)
+        n_lu_new = int(np.sum(Adj[:nNodes_labeled, nNodes_labeled:] > 0))
+        total_new = int(np.sum(Adj > 0) // 2)
+        density_new = total_new / (nNodes_total * (nNodes_total - 1) / 2) * 100
+        print(f"  [EDGE_MODE={edge_mode}] Block-wise thresholds: LL={thres_ll}, LU={thres_lu}, UU={'removed' if edge_mode=='block_no_uu' else f'x{uu_discount}'}")
+        print(f"  After: L-L={n_ll_new} (was {n_ll}), U-U={n_uu_new} (was {n_uu}), L-U={n_lu_new} (was {n_lu}), total={total_new}, density={density_new:.1f}%")
 
     # ======================== Build PyG dataset ========================
     edgeIdxV, edgeAttrV = pyg_utils.dense_to_sparse(torch.FloatTensor(Adj))
@@ -658,15 +752,33 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
         # Combine all nodes
         features_all = np.vstack([feature_labeled, feature_unlabeled])
 
-        # Targets (only labeled have real targets)
+        # Targets (only labeled have real targets) — per-station normalized
         targets_all = np.concatenate([
             targets_norm[n],
             np.zeros(n_unlabeled)
         ]).reshape(-1, 1)
 
+        # Targets globally normalized (same scale for all stations, for GSR interpolation)
+        targets_global = np.concatenate([
+            targets_global_norm[n],
+            np.zeros(n_unlabeled)
+        ]).reshape(-1, 1)
+
+        # WRF T2 in °C, globally normalized with same scale as targets (for residual GSR)
+        wrf_t2_gnorm_all = np.concatenate([
+            wrf_t2_labeled_gnorm[n],
+            wrf_t2_unlabeled_gnorm[n]
+        ]).reshape(-1, 1)
+
+        # Residual target: Δ = target_global - WRF_T2_global (for residual prediction mode)
+        y_residual = targets_global - wrf_t2_gnorm_all  # (nNodes, 1)
+
         _dataset.append(Data(
             x=torch.FloatTensor(features_all),
             y=torch.FloatTensor(targets_all),
+            y_global=torch.FloatTensor(targets_global),
+            y_residual=torch.FloatTensor(y_residual),
+            wrf_t2=torch.FloatTensor(wrf_t2_gnorm_all),
             label_mask=torch.BoolTensor(label_mask),
             edge_index=edgeIdxV,
             edge_attr=edgeAttrV
@@ -727,18 +839,24 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
         # Build train dataset (all timesteps, train_label_mask)
         trainSet = []
         for i, data in enumerate(_dataset):
-            trainSet.append(Data(
-                x=data.x, y=data.y,
-                label_mask=torch.BoolTensor(train_label_mask),
-                edge_index=data.edge_index, edge_attr=data.edge_attr))
+            d = Data(x=data.x, y=data.y,
+                     label_mask=torch.BoolTensor(train_label_mask),
+                     edge_index=data.edge_index, edge_attr=data.edge_attr)
+            for attr in ['wrf_t2', 'y_global', 'y_residual']:
+                if hasattr(data, attr):
+                    setattr(d, attr, getattr(data, attr))
+            trainSet.append(d)
 
         # Build valid dataset (all timesteps, valid_label_mask)
         validSet = []
         for i, data in enumerate(_dataset):
-            validSet.append(Data(
-                x=data.x, y=data.y,
-                label_mask=torch.BoolTensor(valid_label_mask),
-                edge_index=data.edge_index, edge_attr=data.edge_attr))
+            d = Data(x=data.x, y=data.y,
+                     label_mask=torch.BoolTensor(valid_label_mask),
+                     edge_index=data.edge_index, edge_attr=data.edge_attr)
+            for attr in ['wrf_t2', 'y_global', 'y_residual']:
+                if hasattr(data, attr):
+                    setattr(d, attr, getattr(data, attr))
+            validSet.append(d)
 
         _shuffle_train = dataParam.get('shuffle_train', not predMode)
         trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=_shuffle_train)

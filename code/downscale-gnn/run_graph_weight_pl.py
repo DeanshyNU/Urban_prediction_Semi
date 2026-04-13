@@ -357,19 +357,33 @@ def main():
             labeled_truths_epoch.append(y_labeled.detach().cpu())
 
             # --- Weighted unlabeled consistency loss ---
-            # Expand node_weights to match batch: (batch_size * nNodes_unlabeled,)
-            weight_expanded = node_weights_tensor.repeat(batch_size).unsqueeze(-1)  # (B*nU, 1)
+            # In spatial mode, ~label_mask includes validation stations + unlabeled stations
+            # node_weights covers only nNodes_unlabeled, pad with 0 for validation stations
+            n_unlabeled_in_mask = unlabel_mask.sum().item() // batch_size
+            if n_unlabeled_in_mask > nNodes_unlabeled:
+                # Spatial mode: pad weights with 0 for validation stations
+                n_val = n_unlabeled_in_mask - nNodes_unlabeled
+                padded_weights = torch.cat([
+                    torch.zeros(n_val, device=device),  # validation stations (no pseudo loss)
+                    node_weights_tensor  # unlabeled stations
+                ])
+                weight_expanded = padded_weights.repeat(batch_size).unsqueeze(-1)
+            else:
+                weight_expanded = node_weights_tensor.repeat(batch_size).unsqueeze(-1)
 
             pred_diff = pred_strong_ulb - pred_weak_ulb.detach()
             unlabel_mse = pred_diff ** 2
             loss_unlabeled = torch.mean(weight_expanded * unlabel_mse)
 
-            # --- Laplacian loss (spatial smoothness on unaugmented forward pass) ---
+            # [BugFix] Laplacian loss on ALL graphs in batch (not just first)
             if lambda_lap > 0:
                 pred_for_lap = model(_batch.x, _batch.edge_index, _batch.edge_attr)
-                pred_first = pred_for_lap[:nNodes].squeeze(-1)  # first graph in batch
-                lap_diff = pred_first[lap_edge_src] - pred_first[lap_edge_dst]
-                loss_lap = torch.mean(lap_edge_w * lap_diff ** 2)
+                pred_for_lap_all = pred_for_lap.squeeze(-1).reshape(batch_size, nNodes)
+                loss_lap = 0
+                for g_idx in range(batch_size):
+                    lap_diff = pred_for_lap_all[g_idx][lap_edge_src] - pred_for_lap_all[g_idx][lap_edge_dst]
+                    loss_lap = loss_lap + torch.mean(lap_edge_w * lap_diff ** 2)
+                loss_lap = loss_lap / batch_size
             else:
                 loss_lap = torch.tensor(0.0, device=device)
 

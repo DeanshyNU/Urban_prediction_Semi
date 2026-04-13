@@ -38,7 +38,8 @@ class GNN(torch.nn.Module):
             _inputChannel = _HLD
             _outputChannel = modelPara['oDim'] if _n == self.nMLPLayers-1 else _HLD
             _decoder.append(torch.nn.Linear(_inputChannel,_outputChannel))
-            _decoder.append(torch.nn.PReLU(_outputChannel))
+            if _n < self.nMLPLayers - 1:  # [BugFix] 最后一层不加激活函数（回归输出应无约束）
+                _decoder.append(torch.nn.PReLU(_outputChannel))
 
         self.encoder = torch.nn.ModuleList(_encoder)
         self.processor = torch.nn.ModuleList(_processor)
@@ -80,37 +81,38 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes):
         _loss.backward(retain_graph=False)
         opt.step()
         opt.zero_grad(set_to_none=True)
-        _LOSS += _loss
+        _LOSS += _loss.item()  # [BugFix] 用.item()避免GPU内存泄漏
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
     scheduler.step()
     truth, pred = np.array(truth), np.array(pred)
     _RMSE = utils.RMSE(truth,pred)
-    return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
+    return (_LOSS/(_n+1)), _RMSE, truth, pred
 
 def test(loader,model,lossFn,device,nNodes):
     model.eval()
     _LOSS = 0
     pred,truth = [],[]
-    for _n, _batch in enumerate(loader):
-        _batch = _batch.to(device)
-        _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
-        # Use label_mask if available (spatial split mode)
-        if hasattr(_batch, 'label_mask'):
-            mask = _batch.label_mask
-            _loss = lossFn(_yHat[mask], _batch.y[mask])
-            _pred = _yHat[mask].reshape(-1, mask.reshape(-1, nNodes)[0].sum().item())
-            _truth = _batch.y[mask].reshape(-1, mask.reshape(-1, nNodes)[0].sum().item())
-        else:
-            _loss = lossFn(_yHat,_batch.y)
-            _pred = _yHat.reshape(-1,nNodes)
-            _truth = _batch.y.reshape(-1,nNodes)
-        _LOSS += _loss
-        pred += list(_pred.cpu().detach().numpy())
-        truth += list(_truth.cpu().detach().numpy())
+    with torch.no_grad():  # [BugFix] 添加no_grad避免验证时浪费GPU内存
+        for _n, _batch in enumerate(loader):
+            _batch = _batch.to(device)
+            _yHat = model(_batch.x,_batch.edge_index,_batch.edge_attr)
+            # Use label_mask if available (spatial split mode)
+            if hasattr(_batch, 'label_mask'):
+                mask = _batch.label_mask
+                _loss = lossFn(_yHat[mask], _batch.y[mask])
+                _pred = _yHat[mask].reshape(-1, mask.reshape(-1, nNodes)[0].sum().item())
+                _truth = _batch.y[mask].reshape(-1, mask.reshape(-1, nNodes)[0].sum().item())
+            else:
+                _loss = lossFn(_yHat,_batch.y)
+                _pred = _yHat.reshape(-1,nNodes)
+                _truth = _batch.y.reshape(-1,nNodes)
+            _LOSS += _loss.item()  # [BugFix] 用.item()
+            pred += list(_pred.cpu().numpy())
+            truth += list(_truth.cpu().numpy())
     truth, pred = np.array(truth), np.array(pred)
     _RMSE = utils.RMSE(truth,pred)
-    return (_LOSS/(_n+1)).item(), _RMSE, truth, pred
+    return (_LOSS/(_n+1)), _RMSE, truth, pred
 
 def loadCheckPoint(modelName,model,opt,device,load=False,resetLr=False,lr=5e-5,predMode=False,output_dir='./'):
     chkptPath = f'{output_dir}/{modelName}.pt'

@@ -249,6 +249,10 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
     """
     model.train()  # dropout active for MC Dropout
     nNodes_unlabeled = nNodes - nNodes_labeled
+    # In spatial mode, ~label_mask includes validation stations + unlabeled
+    # Detect actual unlabeled count from first batch
+    _first_batch = next(iter(loader))
+    nNodes_unlabeled_actual = (~_first_batch.label_mask).sum().item() // (_first_batch.x.shape[0] // nNodes)
 
     _LOSS = 0
     _LABELED_LOSS = 0
@@ -274,7 +278,7 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
                 _batch.x, _batch.edge_index, _batch.edge_attr)
             with torch.no_grad():
                 _yHat_mc = model(x_weak, ei_weak, ea_weak)
-            unlabeled_pred = _yHat_mc[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
+            unlabeled_pred = _yHat_mc[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled_actual)
             mc_preds.append(unlabeled_pred)
 
         mc_preds = torch.stack(mc_preds, dim=0)  # (mc_iters, batch_size, nNodes_unlabeled)
@@ -296,15 +300,23 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
         total_unlabeled_samples += n_total
 
         # ==================== Step 3: Graph-based calibration ====================
-        # Get labeled targets for this batch
-        labeled_targets = _batch.y[label_mask].squeeze(-1).reshape(batch_size, nNodes_labeled)
-        labeled_targets_np = labeled_targets.detach().cpu().numpy()
+        # In spatial mode, label_mask has 50 True (not 58), so we need all 58 labeled targets
+        # Use batch.y for all labeled nodes (first 58 = nNodes_labeled in graph)
+        all_labeled_targets = _batch.y[:batch_size * nNodes].reshape(batch_size, nNodes)[:, :nNodes_labeled]
+        all_labeled_targets_np = all_labeled_targets.detach().cpu().numpy()
         pseudo_labels_np = pseudo_labels.detach().cpu().numpy()
 
+        # Calibrate only actual unlabeled nodes (first nNodes_unlabeled in pseudo_labels)
+        pl_for_calib = pseudo_labels_np[:, -nNodes_unlabeled:] if pseudo_labels_np.shape[1] > nNodes_unlabeled else pseudo_labels_np
         calibrated_np, _ = graph_calibrate_pseudo_labels(
-            pseudo_labels_np, labeled_targets_np, neighbor_info,
+            pl_for_calib, all_labeled_targets_np, neighbor_info,
             nNodes_unlabeled, beta
         )
+        # Pad back if spatial mode added validation stations at the front
+        if pseudo_labels_np.shape[1] > nNodes_unlabeled:
+            n_val = pseudo_labels_np.shape[1] - nNodes_unlabeled
+            pad = pseudo_labels_np[:, :n_val]  # validation stations keep original pseudo-labels
+            calibrated_np = np.concatenate([pad, calibrated_np], axis=1)
         calibrated = torch.FloatTensor(calibrated_np).to(device)
 
         # ==================== Step 4: Strong augmentation → loss ====================
@@ -320,7 +332,7 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
         x_strong, ei_strong, ea_strong = structured_augment_strong(
             _batch.x, _batch.edge_index, _batch.edge_attr)
         _yHat_strong_full = model(x_strong, ei_strong, ea_strong)
-        _yHat_unlabeled = _yHat_strong_full[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
+        _yHat_unlabeled = _yHat_strong_full[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled_actual)
 
         # Masked MSE loss (only on filtered pseudo-labels)
         pseudo_diff = (_yHat_unlabeled - calibrated.detach()) ** 2
@@ -348,8 +360,9 @@ def train_simregmatch(loader, model, lossFn, opt, scheduler, device,
             all_pred_diffs.append(pred_diff_sw)
 
         # Record labeled predictions for RMSE
-        _pred = _yHat_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
-        _truth = _y_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
+        _n_labeled_actual = label_mask.sum().item() // batch_size
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
 

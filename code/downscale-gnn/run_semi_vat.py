@@ -183,8 +183,9 @@ def train_vat(loader, model, lossFn, opt, scheduler, device,
                 all_top_dims = debug['top5_adv_dims']
 
         # Record labeled predictions
-        _pred = _yHat_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
-        _truth = _y_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
+        _n_labeled_actual = label_mask[:nNodes].sum().item()
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
 

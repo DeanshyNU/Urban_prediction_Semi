@@ -82,13 +82,14 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
                 for _batch in loader:
                     _batch = _batch.to(device)
                     _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
-                    label_mask = _batch.label_mask
                     batch_size = _batch.x.shape[0] // nNodes
-                    # Unlabeled
-                    unlabeled_pred = _yHat[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
+                    # Use positional indexing for consistency in spatial mode
+                    _yHat_reshaped = _yHat.squeeze(-1).reshape(batch_size, nNodes)
+                    # Unlabeled (by position, truly unlabeled only)
+                    unlabeled_pred = _yHat_reshaped[:, nNodes_labeled:]  # (batch_size, nNodes_unlabeled)
                     sample_preds.append(unlabeled_pred.cpu().numpy())
-                    # Labeled (for debug comparison)
-                    labeled_pred = _yHat[label_mask].squeeze(-1).reshape(batch_size, nNodes_labeled)
+                    # Labeled (all 58, for debug comparison)
+                    labeled_pred = _yHat_reshaped[:, :nNodes_labeled]  # (batch_size, nNodes_labeled)
                     sample_labeled.append(labeled_pred.cpu().numpy())
             mc_preds.append(np.concatenate(sample_preds, axis=0))
             mc_labeled_preds.append(np.concatenate(sample_labeled, axis=0))
@@ -135,13 +136,16 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
             for _batch in loader:
                 _batch = _batch.to(device)
                 _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
-                label_mask = _batch.label_mask
                 batch_size = _batch.x.shape[0] // nNodes
-                unlabeled_pred = _yHat[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
+                # Use positional indexing (not label_mask) to get all 58 labeled stations
+                # This ensures neighbor index nb_l (0-57) maps correctly
+                _yHat_reshaped = _yHat.squeeze(-1).reshape(batch_size, nNodes)
+                unlabeled_pred = _yHat_reshaped[:, nNodes_labeled:]  # (batch_size, nNodes_unlabeled)
                 sample_preds_u.append(unlabeled_pred.cpu().numpy())
-                labeled_pred = _yHat[label_mask].squeeze(-1).reshape(batch_size, nNodes_labeled)
+                labeled_pred = _yHat_reshaped[:, :nNodes_labeled]  # (batch_size, 58)
                 sample_preds_l.append(labeled_pred.cpu().numpy())
-                labeled_target = _batch.y[label_mask].squeeze(-1).reshape(batch_size, nNodes_labeled)
+                _y_reshaped = _batch.y.squeeze(-1).reshape(batch_size, nNodes)
+                labeled_target = _y_reshaped[:, :nNodes_labeled]  # (batch_size, 58)
                 sample_targets_l.append(labeled_target.cpu().numpy())
 
         pseudo_labels = np.concatenate(sample_preds_u, axis=0)
@@ -261,14 +265,13 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
             for _batch in loader:
                 _batch = _batch.to(device)
                 _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
-                label_mask = _batch.label_mask
                 batch_size = _batch.x.shape[0] // nNodes
-                unlabeled_pred = _yHat[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
+                # Use positional indexing (truly unlabeled only)
+                unlabeled_pred = _yHat.squeeze(-1).reshape(batch_size, nNodes)[:, nNodes_labeled:]
                 sample_preds_u.append(unlabeled_pred.cpu().numpy())
         pseudo_labels = np.concatenate(sample_preds_u, axis=0)
 
         # Step B: Calibrate on VALID set (model's actual residuals on unseen data)
-        # valid_loader is passed via adj_matrix argument (repurposed for neighbor_error)
         # We need the valid loader - it's stored in the global scope by main()
         valid_loader_ref = _neighbor_error_valid_loader  # set by main() before calling
         val_preds_l = []
@@ -277,10 +280,11 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
             for _batch in valid_loader_ref:
                 _batch = _batch.to(device)
                 _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
-                label_mask = _batch.label_mask
                 batch_size = _batch.x.shape[0] // nNodes
-                labeled_pred = _yHat[label_mask].squeeze(-1).reshape(batch_size, nNodes_labeled)
-                labeled_target = _batch.y[label_mask].squeeze(-1).reshape(batch_size, nNodes_labeled)
+                # Extract ALL labeled stations by position (not by label_mask)
+                # _batch.y has valid targets for all 58 labeled stations
+                labeled_pred = _yHat.squeeze(-1).reshape(batch_size, nNodes)[:, :nNodes_labeled]
+                labeled_target = _batch.y.squeeze(-1).reshape(batch_size, nNodes)[:, :nNodes_labeled]
                 val_preds_l.append(labeled_pred.cpu().numpy())
                 val_targets_l.append(labeled_target.cpu().numpy())
 
@@ -368,9 +372,9 @@ def generate_pseudo_labels(model, loader, device, nNodes, nNodes_labeled,
             for _batch in loader:
                 _batch = _batch.to(device)
                 _yHat = model(_batch.x, _batch.edge_index, _batch.edge_attr)
-                label_mask = _batch.label_mask
                 batch_size = _batch.x.shape[0] // nNodes
-                unlabeled_pred = _yHat[~label_mask].squeeze(-1).reshape(batch_size, nNodes_unlabeled)
+                # Use positional indexing (truly unlabeled only)
+                unlabeled_pred = _yHat.squeeze(-1).reshape(batch_size, nNodes)[:, nNodes_labeled:]
                 sample_preds.append(unlabeled_pred.cpu().numpy())
 
         pseudo_labels = np.concatenate(sample_preds, axis=0)
@@ -435,9 +439,8 @@ def train_self_training(loader, model, lossFn, opt, scheduler, device,
         _y_labeled = _batch.y[label_mask]
         labeled_loss = lossFn(_yHat_labeled, _y_labeled)
 
-        # 2. Pseudo-label loss on unlabeled nodes
-        _yHat_unlabeled = _yHat[~label_mask].squeeze(-1)  # (batch_size * nNodes_unlabeled,)
-        _yHat_unlabeled = _yHat_unlabeled.reshape(batch_size, nNodes_unlabeled)
+        # 2. Pseudo-label loss on unlabeled nodes (positional indexing, truly unlabeled only)
+        _yHat_unlabeled = _yHat.squeeze(-1).reshape(batch_size, nNodes)[:, nNodes_labeled:]  # (batch_size, nNodes_unlabeled)
 
         # Get corresponding pseudo-labels and weights for this batch
         batch_start = sample_offset + _n * batch_size
@@ -455,12 +458,15 @@ def train_self_training(loader, model, lossFn, opt, scheduler, device,
         pseudo_diff = (_yHat_unlabeled - pl) ** 2
         pseudo_loss = (pw * pseudo_diff).mean()
 
-        # 3. Laplacian loss (optional)
+        # 3. [BugFix] Laplacian loss on ALL graphs in batch (optional)
         lap_loss_val = 0
         if semi_mode == 'laplacian' and adj_matrix is not None:
-            _yHat_first = _yHat[:nNodes].squeeze(-1)
-            diff = _yHat_first[_edge_src] - _yHat_first[_edge_dst]
-            lap_loss = torch.mean(_edge_w * diff ** 2)
+            _yHat_lap_all = _yHat.squeeze(-1).reshape(batch_size, nNodes)
+            lap_loss = 0
+            for g_idx in range(batch_size):
+                diff = _yHat_lap_all[g_idx][_edge_src] - _yHat_lap_all[g_idx][_edge_dst]
+                lap_loss = lap_loss + torch.mean(_edge_w * diff ** 2)
+            lap_loss = lap_loss / batch_size
             lap_loss_val = lap_loss.item()
         else:
             lap_loss = 0
@@ -473,14 +479,15 @@ def train_self_training(loader, model, lossFn, opt, scheduler, device,
         opt.step()
         opt.zero_grad(set_to_none=True)
 
-        _LOSS += total_loss
+        _LOSS += total_loss.item()  # [BugFix] 用.item()避免GPU内存泄漏
         _LABELED_LOSS += labeled_loss.item()
         _PSEUDO_LOSS += pseudo_loss.item()
         _LAP_LOSS += lap_loss_val
 
         # Record labeled predictions for RMSE
-        _pred = _yHat_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
-        _truth = _y_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
+        _n_labeled_actual = label_mask[:nNodes].sum().item()
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
 
@@ -488,7 +495,7 @@ def train_self_training(loader, model, lossFn, opt, scheduler, device,
     truth, pred = np.array(truth), np.array(pred)
     _RMSE = utils.RMSE(truth, pred)
     n_batches = _n + 1
-    return ((_LOSS / n_batches).item(), _RMSE, truth, pred,
+    return ((_LOSS / n_batches), _RMSE, truth, pred,
             _LABELED_LOSS / n_batches, _PSEUDO_LOSS / n_batches,
             _LAP_LOSS / n_batches)
 

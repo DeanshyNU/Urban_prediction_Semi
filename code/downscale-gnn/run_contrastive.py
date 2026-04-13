@@ -292,18 +292,28 @@ def main():
                     labeled_reps, labeled_targets,
                     temperature=temperature, margin=margin)
 
-            # --- Graph contrastive loss (all nodes, uses graph structure) ---
-            # For efficiency, use first graph in batch
-            first_graph_mask = torch.arange(_batch.x.shape[0], device=device) < nNodes
-            first_graph_reps = representations[:nNodes]
-            # Get edges for first graph only
-            edge_mask = (_batch.edge_index[0] < nNodes) & (_batch.edge_index[1] < nNodes)
-            first_ei = _batch.edge_index[:, edge_mask]
-            first_ea = _batch.edge_attr[edge_mask] if _batch.edge_attr is not None else None
-
-            gc_loss, gc_stats = graph_contrastive_loss(
-                first_graph_reps, first_ei, first_ea,
-                nNodes_labeled, temperature=temperature)
+            # [BugFix] Graph contrastive loss on ALL graphs in batch (not just first)
+            batch_size = _batch.x.shape[0] // nNodes
+            gc_loss = 0
+            gc_stats_accum = {}
+            for g in range(batch_size):
+                g_start = g * nNodes
+                g_end = (g + 1) * nNodes
+                g_reps = representations[g_start:g_end]
+                edge_mask = (_batch.edge_index[0] >= g_start) & (_batch.edge_index[0] < g_end) & \
+                            (_batch.edge_index[1] >= g_start) & (_batch.edge_index[1] < g_end)
+                g_ei = _batch.edge_index[:, edge_mask] - g_start  # reindex to [0, nNodes)
+                g_ea = _batch.edge_attr[edge_mask] if _batch.edge_attr is not None else None
+                g_gc_loss, g_gc_stats = graph_contrastive_loss(
+                    g_reps, g_ei, g_ea, nNodes_labeled, temperature=temperature)
+                gc_loss = gc_loss + g_gc_loss
+                if not gc_stats_accum:
+                    gc_stats_accum = {k: v for k, v in g_gc_stats.items()}
+                else:
+                    for k, v in g_gc_stats.items():
+                        gc_stats_accum[k] += v
+            gc_loss = gc_loss / batch_size
+            gc_stats = {k: v / batch_size for k, v in gc_stats_accum.items()} if gc_stats_accum else {}
 
             # --- Total loss ---
             total_loss = sup_loss + lambda_sc * sc_loss + lambda_gc * gc_loss

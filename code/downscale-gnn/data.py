@@ -218,7 +218,20 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False):
     cfd_features_norm, cfd_off, cfd_scl = utils.MinMax(cfd_features.copy())
     clms_features_norm, clms_off, clms_scl = utils.MinMax(clms_features.copy())
     # Target normalization
-    targets_norm, tgt_off, tgt_scl = utils.MinMax(targets.copy())
+    norm_mode = os.environ.get('NORM_MODE', 'per_station').lower()
+    if norm_mode == 'global':
+        _tgt_global_min = targets.min()
+        _tgt_global_max = targets.max()
+        _tgt_global_scl = _tgt_global_max - _tgt_global_min
+        if _tgt_global_scl == 0:
+            _tgt_global_scl = 1.0
+        targets_norm = (targets - _tgt_global_min) / _tgt_global_scl
+        tgt_off = np.full(targets.shape[1], _tgt_global_min)
+        tgt_scl = np.full(targets.shape[1], _tgt_global_scl)
+        print(f"  Target normalization: GLOBAL (min={_tgt_global_min:.2f}, max={_tgt_global_max:.2f})")
+    else:
+        targets_norm, tgt_off, tgt_scl = utils.MinMax(targets.copy())
+        print(f"  Target normalization: PER-STATION")
 
     print(f"  WRF normalized: [{cfd_features_norm.min():.3f}, {cfd_features_norm.max():.3f}]")
     print(f"  CLMS normalized: [{clms_features_norm.min():.3f}, {clms_features_norm.max():.3f}]")

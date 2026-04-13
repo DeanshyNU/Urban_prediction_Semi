@@ -109,8 +109,9 @@ def train_temporal_ensemble(loader, model, lossFn, opt, scheduler, device,
         current_preds_all.append(_yHat_all.detach().cpu().numpy())
 
         # Record labeled predictions for RMSE
-        _pred = _yHat_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
-        _truth = _y_labeled.squeeze(-1).reshape(-1, nNodes_labeled)
+        _n_labeled_actual = label_mask[:nNodes].sum().item()
+        _pred = _yHat_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
+        _truth = _y_labeled.squeeze(-1).reshape(-1, _n_labeled_actual)
         pred += list(_pred.cpu().detach().numpy())
         truth += list(_truth.cpu().detach().numpy())
 
