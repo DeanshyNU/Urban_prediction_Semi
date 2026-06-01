@@ -31,11 +31,13 @@ def main():
     trainLoader, validLoader, metadata, _ = data.dataGen(dataParam,path)
     ##----------------------Generate model----------------------
     nEpoch = 5000
+    use_gnn = int(os.environ.get('USE_GNN', '1'))
+    n_gnn = int(os.environ.get('N_GNN', '3'))
     modelParam = {
             'HLD':      128,
             'nMLP':     2,
     #-------------------------GNN part----------------------
-            'nGNN':     3,
+            'nGNN':     n_gnn,
             'nGAT':     1,
             'nHeads':   1,
             'K':        1,
@@ -44,7 +46,9 @@ def main():
             'BN':       False,
             'Dropout':  False,
             'conv_type': conv_type,
+            'use_gnn':  bool(use_gnn),
     }
+    print(f"  Model: USE_GNN={use_gnn}, N_GNN={n_gnn}")
     modelName = f'geoEmbed_{dataParam["geoMethod"]}_{conv_type}_full_{dataParam["geoFeatures"]}Geo'
     wandb_name = f'{modelName}_pool{dataParam["poolSize"]}_job{job_id}' if job_id else modelName
 
@@ -83,19 +87,23 @@ def main():
         with open(f'{output_dir}/{modelName}_log','a') as f: print(torch.cuda.get_device_name(torch.cuda.current_device()),file=f)
     with open(f'{output_dir}/{modelName}_log','a') as f: print(model,file=f)
 
+    _tgt_scl_C = float(metadata.get('tgt_global_scl', 1.0))
     for epoch in range(EPOCH,nEpoch):
         trainLoss,trainRMSE,_,_ = network.train(trainLoader,model,lossFn,opt,scheduler,device,metadata['nNodes'])
-        validLoss,validRMSE,_,_ = network.test(validLoader,model,lossFn,device,metadata['nNodes'])
+        validLoss,validRMSE,_valid_pred,_valid_truth = network.test(validLoader,model,lossFn,device,metadata['nNodes'])
+        # 6-metric suite (RMSE/MBE/MAE × normalized/Celsius)
+        valid_metrics_6 = utils.compute_all_metrics(_valid_truth, _valid_pred, scl=_tgt_scl_C)
         # Early NaN detection (print to stdout)
         if epoch < 5 or epoch % 100 == 0:
-            print(f"Epoch {epoch}: train_loss={trainLoss:.4e}, train_rmse={trainRMSE[0]:.4f}, valid_rmse={validRMSE[0]:.4f}")
+            print(f"Epoch {epoch}: train_loss={trainLoss:.4e}, train_rmse={trainRMSE[0]:.4f}, "
+                  f"valid_rmse={valid_metrics_6['rmse_norm']:.4f} ({valid_metrics_6['rmse_C']:.3f}°C)")
         if np.isnan(trainLoss) or np.isnan(trainRMSE[0]):
             print(f"ERROR: NaN detected at epoch {epoch}! Stopping.")
             break
         with open(f'{output_dir}/{modelName}_log','a') as f: print("", file=f)
-        with open(f'{output_dir}/{modelName}_log','a') as f: print (f"Epoch {epoch}: loss {trainLoss:1.4e}/{validLoss:1.4e}; RMSE {trainRMSE[0]:1.3f}/{validRMSE[0]:1.3f}; LR {scheduler.get_last_lr()} ",file=f)
+        with open(f'{output_dir}/{modelName}_log','a') as f: print (f"Epoch {epoch}: loss {trainLoss:1.4e}/{validLoss:1.4e}; RMSE {trainRMSE[0]:1.3f}/{valid_metrics_6['rmse_norm']:.4f} ({valid_metrics_6['rmse_C']:.3f}°C); LR {scheduler.get_last_lr()} ",file=f)
         with open(f'{output_dir}/{modelName}_log','a') as f: print (f"RMSE std: {trainRMSE[1]:1.3f}/{validRMSE[1]:1.3f}; min: {trainRMSE[2]:1.3f}/{validRMSE[2]:1.3f}; max: {trainRMSE[3]:1.3f}/{validRMSE[3]:1.3f};",file=f)
-        
+
         # 记录到 W&B
         wandb.log({
             'epoch': epoch,
@@ -109,6 +117,13 @@ def main():
             'valid/rmse_std': validRMSE[1],
             'valid/rmse_min': validRMSE[2],
             'valid/rmse_max': validRMSE[3],
+            # ---- 6-metric suite ----
+            'metrics/rmse_norm': valid_metrics_6['rmse_norm'],
+            'metrics/mbe_norm':  valid_metrics_6['mbe_norm'],
+            'metrics/mae_norm':  valid_metrics_6['mae_norm'],
+            'metrics/rmse_C':    valid_metrics_6['rmse_C'],
+            'metrics/mbe_C':     valid_metrics_6['mbe_C'],
+            'metrics/mae_C':     valid_metrics_6['mae_C'],
             'learning_rate': scheduler.get_last_lr()[0],
             'best_valid_rmse': bestLoss,
         })

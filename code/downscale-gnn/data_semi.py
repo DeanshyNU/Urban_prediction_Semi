@@ -241,6 +241,9 @@ def select_unlabeled_fps(Map_labeled, SM_labeled, Map_all_unlabeled, SM_all_unla
 
     # ========== Debug stats ==========
     print(f"  [Step2] FPS complete: {len(selected)}/{n_select} stations selected")
+    if len(selection_dists) == 0:
+        print(f"  [Step2] No stations selected (n_select=0); skipping distance stats")
+        return selected
     print(f"  [Step2] Pick-time distance: min={selection_dists.min():.6f}, "
           f"max={selection_dists.max():.6f}, mean={selection_dists.mean():.6f}")
 
@@ -271,6 +274,10 @@ def genGeoFeatures_unlabeled(UrbanFeatureMat, geoMethod='average', poolSize=15,
     _raw = UrbanFeatureMat
     _raw = np.nan_to_num(_raw, nan=0.0)
     _imageSize, _, _nFeatures, _nStations = _raw.shape
+    # Guard for n_unlabeled=0 case (empty patch tensor)
+    if _nStations == 0:
+        out_dim = poolSize * poolSize * _nFeatures if geoMethod == 'average' else nCompPCA
+        return torch.zeros(0, out_dim), norm_off, norm_scl, 0
 
     use_provided = (norm_off is not None and norm_scl is not None)
 
@@ -290,8 +297,19 @@ def genGeoFeatures_unlabeled(UrbanFeatureMat, geoMethod='average', poolSize=15,
         _norm = np.clip(_norm, 0.0, 1.0)
         _geoFeatures = np.transpose(_norm, (2, 3, 0, 1))
         _geoFeatures = torch.FloatTensor(_geoFeatures)
-        _avgPool = torch.nn.AdaptiveAvgPool2d((poolSize, poolSize))
-        _geoFeatures = _avgPool(_geoFeatures).reshape(_nStations, -1)
+        # POOL_TYPE: avg (default) / directional (new) / raw (new — no pool, return 4D)
+        pool_type = os.environ.get('POOL_TYPE', 'avg').lower()
+        if pool_type == 'directional':
+            from utils import directional_pool
+            n_dirs = int(os.environ.get('POOL_DIRS', '4'))
+            _geoFeatures = directional_pool(_geoFeatures, n_dirs=n_dirs)
+        elif pool_type == 'raw':
+            # Return raw (n, C, H, W) tensor — caller must handle 4D shape
+            # No flatten, no pool. Used by GNN_CNN_Raw model.
+            print(f"  [POOL_TYPE=raw] returning raw UFM tensor: shape={_geoFeatures.shape}")
+        else:
+            _avgPool = torch.nn.AdaptiveAvgPool2d((poolSize, poolSize))
+            _geoFeatures = _avgPool(_geoFeatures).reshape(_nStations, -1)
 
     elif geoMethod == 'pca':
         if use_provided:
@@ -362,11 +380,18 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
 
     # GeoEmbed from UrbanFeatureMat
     UFM_l = labeled.get('UrbanFeatureMat', None)
+    raw_ufm_labeled = None   # 4D tensor when POOL_TYPE=raw, else None
     if UFM_l is not None:
         _geoFeatures_labeled, _off, _scl, nL = genGeoFeatures_v2(
             UFM_l, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'])
         if torch.is_tensor(_geoFeatures_labeled):
             _geoFeatures_labeled = _geoFeatures_labeled.numpy()
+        # Detect raw 4D UFM from POOL_TYPE=raw
+        if _geoFeatures_labeled.ndim == 4:
+            raw_ufm_labeled = _geoFeatures_labeled.copy()    # (nL, C, H, W)
+            _geoFeatures_labeled = np.zeros((nL, 0), dtype=np.float32)   # empty placeholder for x
+            print(f"  [RAW UFM] saved labeled raw UFM: shape={raw_ufm_labeled.shape}; "
+                  f"x will not include UFM (model uses CNN on raw)")
     else:
         nL = targets_labeled.shape[1]
         _geoFeatures_labeled = np.zeros((nL, 1))
@@ -406,7 +431,12 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     # FPS station selection
     # USE_FPS=0: fixed slice, USE_FPS=1: pure spatial FPS, USE_FPS=2: score-weighted FPS
     use_fps = int(os.environ.get('USE_FPS', 0))
-    if use_fps and n_unlabeled < total_unlabeled_available:
+    if n_unlabeled == 0:
+        # No-auxiliary mode: skip FPS, return empty selection
+        print(f"  N_UNLABELED=0: skipping auxiliary stations entirely")
+        fps_indices = np.array([], dtype=int)
+        global_indices = np.array([], dtype=int)
+    elif use_fps and n_unlabeled < total_unlabeled_available:
         fps_mode = "score-weighted" if use_fps == 2 else "pure spatial"
         print(f"  Selecting {n_unlabeled} from {total_unlabeled_available} candidates using FPS ({fps_mode})...")
         fps_indices = select_unlabeled_fps(
@@ -506,12 +536,17 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
             print(f"  [Warning] UrbanFeatureMat failed for {n_unlabeled} stations: {e}")
             UFM_u = None
 
+    raw_ufm_unlabeled = None
     if UFM_u is not None:
         _geoFeatures_unlabeled, _, _, _ = genGeoFeatures_unlabeled(
             UFM_u, dataParam['geoMethod'], dataParam['poolSize'], dataParam['nCompPCA'],
             norm_off=_off, norm_scl=_scl)
         if torch.is_tensor(_geoFeatures_unlabeled):
             _geoFeatures_unlabeled = _geoFeatures_unlabeled.numpy()
+        if _geoFeatures_unlabeled.ndim == 4:
+            raw_ufm_unlabeled = _geoFeatures_unlabeled.copy()
+            _geoFeatures_unlabeled = np.zeros((n_unlabeled, 0), dtype=np.float32)
+            print(f"  [RAW UFM] saved unlabeled raw UFM: shape={raw_ufm_unlabeled.shape}")
     else:
         _geoFeatures_unlabeled = np.zeros((n_unlabeled, _geoFeatures_labeled.shape[1]))
 
@@ -557,8 +592,12 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
         f"WRF channel 0 may not be T2: range [{wrf_t2_labeled_celsius.min():.1f}, {wrf_t2_labeled_celsius.max():.1f}]°C"
     wrf_t2_labeled_gnorm = (wrf_t2_labeled_celsius - _tgt_global_min) / _tgt_global_scl
     wrf_t2_unlabeled_gnorm = (wrf_t2_unlabeled_celsius - _tgt_global_min) / _tgt_global_scl
-    print(f"  WRF T2 (°C): labeled [{wrf_t2_labeled_celsius.min():.1f}, {wrf_t2_labeled_celsius.max():.1f}], "
-          f"unlabeled [{wrf_t2_unlabeled_celsius.min():.1f}, {wrf_t2_unlabeled_celsius.max():.1f}]")
+    if wrf_t2_unlabeled_celsius.size > 0:
+        print(f"  WRF T2 (°C): labeled [{wrf_t2_labeled_celsius.min():.1f}, {wrf_t2_labeled_celsius.max():.1f}], "
+              f"unlabeled [{wrf_t2_unlabeled_celsius.min():.1f}, {wrf_t2_unlabeled_celsius.max():.1f}]")
+    else:
+        print(f"  WRF T2 (°C): labeled [{wrf_t2_labeled_celsius.min():.1f}, {wrf_t2_labeled_celsius.max():.1f}], "
+              f"unlabeled (empty, n_unlabeled=0)")
     # [Debug] Residual check: target - WRF_T2 should be small
     _delta_check = targets_global_norm - wrf_t2_labeled_gnorm
     print(f"  [Debug] Residual (target-WRF_T2) gnorm: mean={_delta_check.mean():.4f}, "
@@ -572,8 +611,12 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
     clms_unlabeled_norm = np.clip(clms_unlabeled_norm, 0.0, 1.0)
     print(f"  [BugFix] Unlabeled WRF/CLMS normalized using labeled parameters (not independently)")
     # [Debug] Verify normalization consistency
-    print(f"  [Debug] WRF norm range: labeled=[{cfd_labeled_norm.min():.3f}, {cfd_labeled_norm.max():.3f}], "
-          f"unlabeled=[{cfd_unlabeled_norm.min():.3f}, {cfd_unlabeled_norm.max():.3f}]")
+    if cfd_unlabeled_norm.size > 0:
+        print(f"  [Debug] WRF norm range: labeled=[{cfd_labeled_norm.min():.3f}, {cfd_labeled_norm.max():.3f}], "
+              f"unlabeled=[{cfd_unlabeled_norm.min():.3f}, {cfd_unlabeled_norm.max():.3f}]")
+    else:
+        print(f"  [Debug] WRF norm range: labeled=[{cfd_labeled_norm.min():.3f}, {cfd_labeled_norm.max():.3f}], "
+              f"unlabeled (empty, n_unlabeled=0)")
 
     # ======================== Build unified graph ========================
     print("Building unified graph (labeled + unlabeled)...")
@@ -699,6 +742,27 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
         print(f"  [EDGE_MODE={edge_mode}] Block-wise thresholds: LL={thres_ll}, LU={thres_lu}, UU={'removed' if edge_mode=='block_no_uu' else f'x{uu_discount}'}")
         print(f"  After: L-L={n_ll_new} (was {n_ll}), U-U={n_uu_new} (was {n_uu}), L-U={n_lu_new} (was {n_lu}), total={total_new}, density={density_new:.1f}%")
 
+    # LU edge sparsification: each unlabeled node keeps only top-K labeled neighbors
+    lu_topk = int(os.environ.get('LU_TOPK', '0'))  # 0 = no sparsification
+    if lu_topk > 0:
+        n_lu_before = int(np.sum(Adj[nNodes_labeled:, :nNodes_labeled] > 0))
+        lu_degrees_before = np.sum(Adj[nNodes_labeled:, :nNodes_labeled] > 0, axis=1)
+        for u in range(nNodes_labeled, nNodes_total):
+            lu_weights = Adj[u, :nNodes_labeled]
+            nonzero_idx = np.where(lu_weights > 0)[0]
+            if len(nonzero_idx) > lu_topk:
+                # Keep only top-K by edge weight
+                sorted_idx = nonzero_idx[np.argsort(-lu_weights[nonzero_idx])]
+                remove_idx = sorted_idx[lu_topk:]
+                Adj[u, remove_idx] = 0.0
+                Adj[remove_idx, u] = 0.0  # keep symmetric
+        n_lu_after = int(np.sum(Adj[nNodes_labeled:, :nNodes_labeled] > 0))
+        lu_degrees_after = np.sum(Adj[nNodes_labeled:, :nNodes_labeled] > 0, axis=1)
+        print(f"  [LU_TOPK={lu_topk}] Sparsified L-U edges: {n_lu_before} → {n_lu_after}")
+        if lu_degrees_before.size > 0:
+            print(f"  LU degree per unlabeled: before mean={lu_degrees_before.mean():.1f} max={lu_degrees_before.max()}, "
+                  f"after mean={lu_degrees_after.mean():.1f} max={lu_degrees_after.max()}")
+
     # ======================== Build PyG dataset ========================
     edgeIdxV, edgeAttrV = pyg_utils.dense_to_sparse(torch.FloatTensor(Adj))
 
@@ -735,22 +799,25 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
         feature_labeled = np.hstack(feat_l)
 
         # ===== Unlabeled node features =====
-        _cfd_u = cfd_unlabeled_norm[n]        # (nU, 63)
-        _clms_u = clms_unlabeled_norm[n]      # (nU, 3)
-        _tdb_u = cfd_unlabeled_norm[n - _window:n]
-        _tdb_u = np.transpose(_tdb_u, (1, 0, 2)).reshape(n_unlabeled, -1)
-        _tdf_u = cfd_unlabeled_norm[n:n + _window]
-        _tdf_u = np.transpose(_tdf_u, (1, 0, 2)).reshape(n_unlabeled, -1)
+        if n_unlabeled > 0:
+            _cfd_u = cfd_unlabeled_norm[n]        # (nU, 63)
+            _clms_u = clms_unlabeled_norm[n]      # (nU, 3)
+            _tdb_u = cfd_unlabeled_norm[n - _window:n]
+            _tdb_u = np.transpose(_tdb_u, (1, 0, 2)).reshape(n_unlabeled, -1)
+            _tdf_u = cfd_unlabeled_norm[n:n + _window]
+            _tdf_u = np.transpose(_tdf_u, (1, 0, 2)).reshape(n_unlabeled, -1)
 
-        feat_u = [_cfd_u, _tdb_u, _tdf_u, _clms_u]
-        if UF_unlabeled_norm is not None:
-            feat_u.append(UF_unlabeled_norm)
-        if dataParam.get('geoFeatures', 'full') != 'no':
-            feat_u.append(_geoFeatures_unlabeled)
-        feature_unlabeled = np.hstack(feat_u)
+            feat_u = [_cfd_u, _tdb_u, _tdf_u, _clms_u]
+            if UF_unlabeled_norm is not None:
+                feat_u.append(UF_unlabeled_norm)
+            if dataParam.get('geoFeatures', 'full') != 'no':
+                feat_u.append(_geoFeatures_unlabeled)
+            feature_unlabeled = np.hstack(feat_u)
 
-        # Combine all nodes
-        features_all = np.vstack([feature_labeled, feature_unlabeled])
+            # Combine all nodes
+            features_all = np.vstack([feature_labeled, feature_unlabeled])
+        else:
+            features_all = feature_labeled
 
         # Targets (only labeled have real targets) — per-station normalized
         targets_all = np.concatenate([
@@ -867,20 +934,25 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
         valid_indices = list(range(len(validSet)))
 
     else:
-        # --- Temporal split (original): 75/25 time split, all stations ---
-        print(f"  [Temporal Split] Eval mode: TEMPORAL (75/25 time split)")
-        _generator = torch.Generator().manual_seed(19)
-        _trainLength = int(len(_dataset) * nTrn)
+        # --- Temporal split: 80/20 sequential time split (last 20% as valid) ---
+        # Honors TEMPORAL_FRAC env var (default 0.8 = first 80% train, last 20% valid).
+        # NOT random — uses the LAST chronological portion for validation.
+        temporal_frac = float(os.environ.get('TEMPORAL_FRAC', '0.8'))
+        _trainLength = int(len(_dataset) * temporal_frac)
         _validLength = len(_dataset) - _trainLength
-        trainSet, validSet = torch.utils.data.random_split(
-            _dataset, [_trainLength, _validLength], _generator)
+        trainSet = torch.utils.data.Subset(_dataset, list(range(_trainLength)))
+        validSet = torch.utils.data.Subset(_dataset, list(range(_trainLength, len(_dataset))))
+        print(f"  [Temporal Split] Eval mode: TEMPORAL (sequential, "
+              f"first {temporal_frac:.0%} train / last {1-temporal_frac:.0%} valid)")
+        print(f"  [Temporal Split] Train timesteps: {_trainLength}, Valid timesteps: {_validLength}")
+
         _shuffle_train = dataParam.get('shuffle_train', not predMode)
         trainLoader = DataLoader(trainSet, batch_size=_batchSize, shuffle=_shuffle_train)
         valid_batch_size = min(_batchSize, len(validSet))
         validLoader = DataLoader(validSet, batch_size=valid_batch_size, shuffle=False)
 
-        train_indices = trainSet.indices
-        valid_indices = validSet.indices
+        train_indices = list(range(_trainLength))
+        valid_indices = list(range(_trainLength, len(_dataset)))
         valid_station_idx = None
         train_station_idx = None
 
@@ -902,8 +974,18 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False, n_unlabeled=200):
         'label_mask': label_mask,  # original full label_mask (all 58 labeled)
         'tgt_off': tgt_off,
         'tgt_scl': tgt_scl,
+        'tgt_global_scl': float(_tgt_global_scl),    # for denormalization to Celsius
+        'tgt_global_min': float(_tgt_global_min),
         'eval_mode': eval_mode,
         'valid_station_idx': valid_station_idx,
         'train_station_idx': train_station_idx,
     }
+    # If POOL_TYPE=raw, attach raw UFM for the model to use as buffer
+    if raw_ufm_labeled is not None:
+        if raw_ufm_unlabeled is not None and n_unlabeled > 0:
+            raw_ufm_combined = np.concatenate([raw_ufm_labeled, raw_ufm_unlabeled], axis=0)
+        else:
+            raw_ufm_combined = raw_ufm_labeled
+        metadata['raw_ufm'] = raw_ufm_combined.astype(np.float32)
+        print(f"  [RAW UFM] metadata['raw_ufm']: shape={metadata['raw_ufm'].shape}")
     return trainLoader, validLoader, metadata, validSet

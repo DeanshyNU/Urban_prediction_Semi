@@ -9,6 +9,7 @@ class GNN(torch.nn.Module):
         self.nGNNLayers = modelPara['nGNN']
         self.nMLPLayers = modelPara['nMLP']
         self.conv_type = modelPara.get('conv_type', 'graphconv').lower()
+        self.use_gnn = modelPara.get('use_gnn', True)  # [Ablation] False = skip GNN
         _HLD = modelPara['HLD']
         _encoder, _processor, _decoder = [],[],[]
 
@@ -18,21 +19,21 @@ class GNN(torch.nn.Module):
             _encoder.append(torch.nn.Linear(_inputChannel,_outputChannel))
             _encoder.append(torch.nn.PReLU(_outputChannel))
 
-        for _n in range(self.nGNNLayers):
-            _inputChannel = _HLD
-            _outputChannel = _HLD
-            if self.conv_type == 'sageconv':
-                _processor.append(SAGEConv(_inputChannel, _outputChannel, aggr='mean'))
-            elif self.conv_type == 'appnp':
-                # APPNP only needs one linear layer, uses K-step propagation
-                if _n == 0:
-                    _processor.append(torch.nn.Linear(_inputChannel, _outputChannel))
-                    _processor.append(torch.nn.PReLU(_outputChannel))
-                    _processor.append(APPNP(K=10, alpha=0.1))
-                continue
-            else:  # graphconv (default)
-                _processor.append(GraphConv(_inputChannel, _outputChannel, aggr='mean'))
-            _processor.append(torch.nn.PReLU(_outputChannel))
+        if self.use_gnn:
+            for _n in range(self.nGNNLayers):
+                _inputChannel = _HLD
+                _outputChannel = _HLD
+                if self.conv_type == 'sageconv':
+                    _processor.append(SAGEConv(_inputChannel, _outputChannel, aggr='mean'))
+                elif self.conv_type == 'appnp':
+                    if _n == 0:
+                        _processor.append(torch.nn.Linear(_inputChannel, _outputChannel))
+                        _processor.append(torch.nn.PReLU(_outputChannel))
+                        _processor.append(APPNP(K=10, alpha=0.1))
+                    continue
+                else:
+                    _processor.append(GraphConv(_inputChannel, _outputChannel, aggr='mean'))
+                _processor.append(torch.nn.PReLU(_outputChannel))
 
         for _n in range(self.nMLPLayers):
             _inputChannel = _HLD
@@ -48,15 +49,16 @@ class GNN(torch.nn.Module):
     def forward(self, x, edgeIdx, edgeAttr):
         for _f in self.encoder:
             x = _f(x)
-        for _n, _f in enumerate(self.processor):
-            if isinstance(_f, (GraphConv,)):
-                x = _f(x, edgeIdx, edgeAttr)
-            elif isinstance(_f, (SAGEConv,)):
-                x = _f(x, edgeIdx)
-            elif isinstance(_f, (APPNP,)):
-                x = _f(x, edgeIdx, edgeAttr)
-            else:
-                x = _f(x)
+        if self.use_gnn:
+            for _n, _f in enumerate(self.processor):
+                if isinstance(_f, (GraphConv,)):
+                    x = _f(x, edgeIdx, edgeAttr)
+                elif isinstance(_f, (SAGEConv,)):
+                    x = _f(x, edgeIdx)
+                elif isinstance(_f, (APPNP,)):
+                    x = _f(x, edgeIdx, edgeAttr)
+                else:
+                    x = _f(x)
         for _f in self.decoder:
             x = _f(x)
         return x

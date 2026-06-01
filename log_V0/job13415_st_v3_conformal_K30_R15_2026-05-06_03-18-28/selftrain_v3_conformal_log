@@ -1,0 +1,79 @@
+=== V3 self-training (confidence=conformal) ===
+K_PER_ROUND=30, MAX_ROUNDS=15
+BASE_EP=500, ROUND_EP=200 (warm-start)
+τ=0.5, λ_pseudo=0.3, warm_lr=0.0001
+R0 ep   0: train=0.0461  valid=0.0457 (1.581°C)  sup=1.1276e-03  lap=2.8443e-06
+R0 ep   1: train=0.0409  valid=0.0477 (1.651°C)  sup=9.2249e-04  lap=4.5267e-05
+R0 ep   2: train=0.0396  valid=0.0490 (1.692°C)  sup=8.3226e-04  lap=2.0670e-04
+R0 ep  25: train=0.0326  valid=0.0451 (1.558°C)  sup=5.5284e-04  lap=4.9454e-04
+R0 ep  50: train=0.0308  valid=0.0442 (1.528°C)  sup=4.9902e-04  lap=5.2996e-04
+R0 ep  75: train=0.0299  valid=0.0443 (1.532°C)  sup=4.6817e-04  lap=5.3779e-04
+R0 ep 100: train=0.0292  valid=0.0445 (1.539°C)  sup=4.3380e-04  lap=5.5681e-04
+R0 ep 125: train=0.0283  valid=0.0441 (1.526°C)  sup=4.1386e-04  lap=5.6240e-04
+R0 ep 150: train=0.0275  valid=0.0442 (1.528°C)  sup=3.8446e-04  lap=6.0901e-04
+R0 ep 175: train=0.0265  valid=0.0450 (1.555°C)  sup=3.5987e-04  lap=6.1532e-04
+R0 ep 200: train=0.0255  valid=0.0447 (1.544°C)  sup=3.3274e-04  lap=6.3828e-04
+R0 ep 225: train=0.0251  valid=0.0450 (1.554°C)  sup=3.2140e-04  lap=6.5433e-04
+R0 ep 250: train=0.0242  valid=0.0448 (1.549°C)  sup=2.9875e-04  lap=6.7532e-04
+R0 ep 275: train=0.0231  valid=0.0450 (1.557°C)  sup=2.7349e-04  lap=7.0051e-04
+R0 ep 300: train=0.0229  valid=0.0452 (1.562°C)  sup=2.6638e-04  lap=7.0495e-04
+R0 ep 325: train=0.0222  valid=0.0452 (1.561°C)  sup=2.5100e-04  lap=7.1121e-04
+R0 ep 350: train=0.0218  valid=0.0451 (1.560°C)  sup=2.3936e-04  lap=7.2632e-04
+R0 ep 375: train=0.0212  valid=0.0451 (1.561°C)  sup=2.2952e-04  lap=7.4885e-04
+R0 ep 400: train=0.0204  valid=0.0450 (1.557°C)  sup=2.0986e-04  lap=7.5205e-04
+R0 ep 425: train=0.0201  valid=0.0450 (1.555°C)  sup=2.0425e-04  lap=7.5602e-04
+R0 ep 450: train=0.0198  valid=0.0451 (1.560°C)  sup=1.9606e-04  lap=7.6125e-04
+R0 ep 475: train=0.0193  valid=0.0451 (1.559°C)  sup=1.9276e-04  lap=7.8163e-04
+[R0 done] best=0.0433
+R1 ep   0: train=0.0283 valid=0.0440  sup=4.1688e-04 pseudo=3.2518e-06 lap=5.8014e-04
+R1 ep   1: train=0.0280 valid=0.0439  sup=4.0586e-04 pseudo=2.4449e-06 lap=5.8161e-04
+R1 ep   2: train=0.0279 valid=0.0438  sup=4.0226e-04 pseudo=1.3557e-06 lap=5.8153e-04
+R1 ep  25: train=0.0276 valid=0.0441  sup=3.9450e-04 pseudo=1.4439e-06 lap=5.8931e-04
+R1 ep  50: train=0.0273 valid=0.0442  sup=3.8184e-04 pseudo=2.1833e-06 lap=5.9298e-04
+R1 ep  75: train=0.0270 valid=0.0444  sup=3.7358e-04 pseudo=2.7425e-06 lap=6.1005e-04
+R1 ep 100: train=0.0268 valid=0.0444  sup=3.6781e-04 pseudo=2.8978e-06 lap=6.1243e-04
+R1 ep 125: train=0.0265 valid=0.0445  sup=3.5887e-04 pseudo=3.3911e-06 lap=6.1378e-04
+R1 ep 150: train=0.0263 valid=0.0445  sup=3.5371e-04 pseudo=3.7652e-06 lap=6.1696e-04
+R1 ep 175: train=0.0261 valid=0.0448  sup=3.4881e-04 pseudo=4.2189e-06 lap=6.1714e-04
+R2 ep   0: train=0.0283 valid=0.0440  sup=4.1484e-04 pseudo=3.0737e-06 lap=5.7140e-04
+R2 ep   1: train=0.0280 valid=0.0439  sup=4.0631e-04 pseudo=1.9114e-06 lap=5.8723e-04
+R2 ep   2: train=0.0280 valid=0.0437  sup=4.0368e-04 pseudo=1.4561e-06 lap=5.7491e-04
+R2 ep  25: train=0.0276 valid=0.0442  sup=3.9984e-04 pseudo=1.4477e-06 lap=5.9581e-04
+R2 ep  50: train=0.0273 valid=0.0441  sup=3.8624e-04 pseudo=1.9812e-06 lap=5.9923e-04
+R2 ep  75: train=0.0270 valid=0.0443  sup=3.7693e-04 pseudo=2.3647e-06 lap=6.0275e-04
+R2 ep 100: train=0.0268 valid=0.0444  sup=3.7055e-04 pseudo=2.7274e-06 lap=6.1466e-04
+R2 ep 125: train=0.0265 valid=0.0446  sup=3.6143e-04 pseudo=3.1755e-06 lap=6.1854e-04
+R2 ep 150: train=0.0263 valid=0.0445  sup=3.6136e-04 pseudo=3.8507e-06 lap=6.3019e-04
+R2 ep 175: train=0.0261 valid=0.0447  sup=3.4727e-04 pseudo=3.9952e-06 lap=6.2450e-04
+R3 ep   0: train=0.0283 valid=0.0440  sup=4.2197e-04 pseudo=2.7862e-06 lap=5.7563e-04
+R3 ep   1: train=0.0280 valid=0.0441  sup=4.0124e-04 pseudo=2.0558e-06 lap=5.9017e-04
+R3 ep   2: train=0.0280 valid=0.0438  sup=4.0830e-04 pseudo=1.3723e-06 lap=5.7564e-04
+R3 ep  25: train=0.0276 valid=0.0440  sup=3.9160e-04 pseudo=1.3629e-06 lap=5.9099e-04
+R3 ep  50: train=0.0273 valid=0.0439  sup=3.9153e-04 pseudo=1.8939e-06 lap=6.0299e-04
+R3 ep  75: train=0.0270 valid=0.0443  sup=3.7606e-04 pseudo=2.2344e-06 lap=6.0865e-04
+R3 ep 100: train=0.0268 valid=0.0443  sup=3.7217e-04 pseudo=2.8602e-06 lap=6.0598e-04
+R3 ep 125: train=0.0265 valid=0.0444  sup=3.6419e-04 pseudo=3.2971e-06 lap=6.1721e-04
+R3 ep 150: train=0.0263 valid=0.0445  sup=3.5483e-04 pseudo=3.4122e-06 lap=6.1832e-04
+R3 ep 175: train=0.0261 valid=0.0449  sup=3.4893e-04 pseudo=3.9437e-06 lap=6.3183e-04
+R4 ep   0: train=0.0284 valid=0.0441  sup=4.0904e-04 pseudo=2.5811e-06 lap=5.7042e-04
+R4 ep   1: train=0.0280 valid=0.0440  sup=4.0601e-04 pseudo=1.9970e-06 lap=5.8047e-04
+R4 ep   2: train=0.0280 valid=0.0438  sup=3.9624e-04 pseudo=1.0602e-06 lap=5.6029e-04
+R4 ep  25: train=0.0276 valid=0.0440  sup=3.9793e-04 pseudo=1.2148e-06 lap=5.9788e-04
+R4 ep  50: train=0.0273 valid=0.0441  sup=3.8397e-04 pseudo=1.6692e-06 lap=5.9542e-04
+R4 ep  75: train=0.0271 valid=0.0445  sup=3.7417e-04 pseudo=2.2846e-06 lap=6.0258e-04
+R4 ep 100: train=0.0268 valid=0.0443  sup=3.7058e-04 pseudo=2.7278e-06 lap=6.1530e-04
+R4 ep 125: train=0.0265 valid=0.0444  sup=3.6347e-04 pseudo=2.9290e-06 lap=6.1680e-04
+R4 ep 150: train=0.0263 valid=0.0445  sup=3.5263e-04 pseudo=3.6173e-06 lap=6.2202e-04
+R4 ep 175: train=0.0261 valid=0.0448  sup=3.4990e-04 pseudo=3.7435e-06 lap=6.2737e-04
+R5 ep   0: train=0.0283 valid=0.0440  sup=4.1325e-04 pseudo=2.4746e-06 lap=5.6843e-04
+R5 ep   1: train=0.0280 valid=0.0440  sup=4.1558e-04 pseudo=2.2240e-06 lap=5.8164e-04
+R5 ep   2: train=0.0280 valid=0.0439  sup=4.0032e-04 pseudo=1.2704e-06 lap=5.7130e-04
+R5 ep  25: train=0.0276 valid=0.0440  sup=3.9217e-04 pseudo=1.1521e-06 lap=5.9552e-04
+R5 ep  50: train=0.0273 valid=0.0441  sup=3.8551e-04 pseudo=1.6092e-06 lap=6.0030e-04
+R5 ep  75: train=0.0271 valid=0.0446  sup=3.7813e-04 pseudo=2.1950e-06 lap=5.9761e-04
+R5 ep 100: train=0.0268 valid=0.0445  sup=3.7227e-04 pseudo=2.5744e-06 lap=6.1783e-04
+R5 ep 125: train=0.0265 valid=0.0445  sup=3.6632e-04 pseudo=2.9173e-06 lap=6.1960e-04
+R5 ep 150: train=0.0263 valid=0.0446  sup=3.5537e-04 pseudo=3.2352e-06 lap=6.2285e-04
+R5 ep 175: train=0.0261 valid=0.0447  sup=3.5240e-04 pseudo=3.6379e-06 lap=6.2166e-04
+
+FINAL: R0=0.0433, overall=R2=0.0433

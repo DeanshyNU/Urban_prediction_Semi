@@ -1,6 +1,6 @@
 import torch,os,utils
 import numpy as np
-from torch_geometric.nn import GraphConv, SAGEConv, APPNP
+from torch_geometric.nn import GraphConv, SAGEConv, APPNP, GATConv
 # -----------------Edge Weight Network for Adaptive Laplacian---------------------------
 class EdgeWeightNet(torch.nn.Module):
     """
@@ -29,6 +29,7 @@ class GNN(torch.nn.Module):
         self.nGNNLayers = modelPara['nGNN']
         self.nMLPLayers = modelPara['nMLP']
         self.conv_type = modelPara.get('conv_type', 'graphconv').lower()
+        self.use_gnn = modelPara.get('use_gnn', True)  # [Ablation] False = skip GNN, pure MLP
         _HLD = modelPara['HLD']
         _encoder, _processor, _decoder = [],[],[]
 
@@ -38,20 +39,27 @@ class GNN(torch.nn.Module):
             _encoder.append(torch.nn.Linear(_inputChannel,_outputChannel))
             _encoder.append(torch.nn.PReLU(_outputChannel))
 
-        for _n in range(self.nGNNLayers):
-            _inputChannel = _HLD
-            _outputChannel = _HLD
-            if self.conv_type == 'sageconv':
-                _processor.append(SAGEConv(_inputChannel, _outputChannel, aggr='mean'))
-            elif self.conv_type == 'appnp':
-                if _n == 0:
-                    _processor.append(torch.nn.Linear(_inputChannel, _outputChannel))
-                    _processor.append(torch.nn.PReLU(_outputChannel))
-                    _processor.append(APPNP(K=10, alpha=0.1))
-                continue
-            else:  # graphconv (default)
-                _processor.append(GraphConv(_inputChannel, _outputChannel, aggr='mean'))
-            _processor.append(torch.nn.PReLU(_outputChannel))
+        if self.use_gnn:
+            for _n in range(self.nGNNLayers):
+                _inputChannel = _HLD
+                _outputChannel = _HLD
+                if self.conv_type == 'sageconv':
+                    _processor.append(SAGEConv(_inputChannel, _outputChannel, aggr='mean'))
+                elif self.conv_type == 'appnp':
+                    if _n == 0:
+                        _processor.append(torch.nn.Linear(_inputChannel, _outputChannel))
+                        _processor.append(torch.nn.PReLU(_outputChannel))
+                        _processor.append(APPNP(K=10, alpha=0.1))
+                    continue
+                elif self.conv_type == 'gat':
+                    n_heads = 4
+                    _processor.append(GATConv(_inputChannel, _outputChannel // n_heads,
+                                              heads=n_heads, concat=True))
+                    if _n == 0:
+                        print(f"  [GAT layer {_n}] in={_inputChannel}, out={_outputChannel}, heads={n_heads}")
+                else:  # graphconv (default)
+                    _processor.append(GraphConv(_inputChannel, _outputChannel, aggr='mean'))
+                _processor.append(torch.nn.PReLU(_outputChannel))
 
         for _n in range(self.nMLPLayers):
             _inputChannel = _HLD
@@ -67,22 +75,273 @@ class GNN(torch.nn.Module):
     def forward(self, x, edgeIdx, edgeAttr, return_hidden=False):
         for _f in self.encoder:
             x = _f(x)
-        for _n, _f in enumerate(self.processor):
-            if isinstance(_f, (GraphConv,)):
-                x = _f(x, edgeIdx, edgeAttr)
-            elif isinstance(_f, (SAGEConv,)):
-                x = _f(x, edgeIdx)
-            elif isinstance(_f, (APPNP,)):
-                x = _f(x, edgeIdx, edgeAttr)
-            else:
-                x = _f(x)
-        h = x  # hidden representation after GNN, before decoder
+        if self.use_gnn:
+            for _n, _f in enumerate(self.processor):
+                if isinstance(_f, (GraphConv,)):
+                    x = _f(x, edgeIdx, edgeAttr)
+                elif isinstance(_f, (SAGEConv,)):
+                    x = _f(x, edgeIdx)
+                elif isinstance(_f, (APPNP,)):
+                    x = _f(x, edgeIdx, edgeAttr)
+                elif isinstance(_f, (GATConv,)):
+                    x = _f(x, edgeIdx)
+                else:
+                    x = _f(x)
+        # else: skip GNN processor entirely (pure MLP: encoder → decoder)
+        h = x  # hidden representation after GNN (or encoder if no GNN), before decoder
         for _f in self.decoder:
             x = _f(x)
         if return_hidden:
             return x, h
         return x
     
+# =====================================================================
+# GNN with CNN encoder for UFM (urban feature matrix)
+# =====================================================================
+class GNN_CNN(torch.nn.Module):
+    """
+    Same as GNN, but the UFM portion of input is reshaped to (N, C, H, W) and
+    processed by a CNN encoder instead of being flattened into a flat MLP input.
+
+    Input layout assumption:
+        x[:, :other_dim]      = WRF + CLMS + UF (other_dim = 335 by default)
+        x[:, other_dim:]      = UFM_flat        (size = ufm_channels × ufm_spatial²)
+
+    Encoder:
+        UFM (N, C, H, W) → CNN → ufm_emb (N, cnn_out_dim)
+        Other (N, other_dim) → MLP → other_emb (N, _HLD - cnn_out_dim)
+        Concat → (N, _HLD)  ← matches the standard GNN's encoder output dim
+    """
+    def __init__(self, modelPara):
+        super().__init__()
+        self.nGNNLayers = modelPara['nGNN']
+        self.nMLPLayers = modelPara['nMLP']
+        self.conv_type = modelPara.get('conv_type', 'graphconv').lower()
+        self.use_gnn = modelPara.get('use_gnn', True)
+        _HLD = modelPara['HLD']
+
+        # UFM layout (must match data_semi.py's geo flatten order)
+        self.ufm_channels = modelPara.get('ufm_channels', 7)
+        self.ufm_spatial  = modelPara.get('ufm_spatial', 12)   # poolSize
+        self.ufm_dim = self.ufm_channels * self.ufm_spatial * self.ufm_spatial
+        self.other_dim = modelPara['iDim'] - self.ufm_dim
+        assert self.other_dim > 0, \
+            f"other_dim={self.other_dim}: iDim={modelPara['iDim']} - ufm_dim={self.ufm_dim}"
+
+        # CNN encoder for UFM
+        self.cnn_out_dim = modelPara.get('cnn_out_dim', 32)
+        self.cnn_encoder = torch.nn.Sequential(
+            torch.nn.Conv2d(self.ufm_channels, 16, kernel_size=3, padding=1),
+            torch.nn.PReLU(16),
+            torch.nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            torch.nn.PReLU(32),
+            torch.nn.AdaptiveAvgPool2d(1),     # global average pool → (N, 32, 1, 1)
+            torch.nn.Flatten(),                # → (N, 32)
+        )
+        if self.cnn_out_dim != 32:
+            # adjust if user wants different CNN output
+            self.cnn_encoder.append(torch.nn.Linear(32, self.cnn_out_dim))
+            self.cnn_encoder.append(torch.nn.PReLU(self.cnn_out_dim))
+
+        # MLP encoder for non-UFM features
+        _other_out = _HLD - self.cnn_out_dim
+        assert _other_out > 0, f"_HLD={_HLD} too small for cnn_out_dim={self.cnn_out_dim}"
+        _other_encoder = []
+        for _n in range(self.nMLPLayers):
+            _in_ch = self.other_dim if _n == 0 else _other_out
+            _other_encoder.append(torch.nn.Linear(_in_ch, _other_out))
+            _other_encoder.append(torch.nn.PReLU(_other_out))
+        self.mlp_encoder_other = torch.nn.Sequential(*_other_encoder)
+
+        # Standard processor (GraphConv, SAGEConv, etc) — same as GNN
+        _processor = []
+        if self.use_gnn:
+            for _n in range(self.nGNNLayers):
+                if self.conv_type == 'sageconv':
+                    _processor.append(SAGEConv(_HLD, _HLD, aggr='mean'))
+                elif self.conv_type == 'gat':
+                    n_heads = 4
+                    _processor.append(GATConv(_HLD, _HLD // n_heads, heads=n_heads, concat=True))
+                else:
+                    _processor.append(GraphConv(_HLD, _HLD, aggr='mean'))
+                _processor.append(torch.nn.PReLU(_HLD))
+        self.processor = torch.nn.ModuleList(_processor)
+
+        # Decoder (same as GNN)
+        _decoder = []
+        for _n in range(self.nMLPLayers):
+            _in_ch = _HLD
+            _out_ch = modelPara['oDim'] if _n == self.nMLPLayers - 1 else _HLD
+            _decoder.append(torch.nn.Linear(_in_ch, _out_ch))
+            if _n < self.nMLPLayers - 1:
+                _decoder.append(torch.nn.PReLU(_out_ch))
+        self.decoder = torch.nn.ModuleList(_decoder)
+
+        # One-time architecture printout
+        n_params = sum(p.numel() for p in self.parameters())
+        print(f"  [GNN_CNN] iDim={modelPara['iDim']}, other={self.other_dim}, "
+              f"UFM=({self.ufm_channels},{self.ufm_spatial},{self.ufm_spatial})={self.ufm_dim}")
+        print(f"  [GNN_CNN] CNN out={self.cnn_out_dim}, MLP_other out={_other_out}, HLD={_HLD}")
+        print(f"  [GNN_CNN] total params: {n_params}")
+
+    def forward(self, x, edgeIdx, edgeAttr, return_hidden=False):
+        # Split input into [other, ufm_flat]
+        other = x[:, :self.other_dim]
+        ufm_flat = x[:, self.other_dim:]
+        # Reshape UFM to (N, C, H, W) — order must match data_semi.py's flatten
+        ufm_img = ufm_flat.reshape(-1, self.ufm_channels, self.ufm_spatial, self.ufm_spatial)
+
+        ufm_enc   = self.cnn_encoder(ufm_img)         # (N, cnn_out_dim)
+        other_enc = self.mlp_encoder_other(other)     # (N, _HLD - cnn_out_dim)
+        x = torch.cat([ufm_enc, other_enc], dim=-1)   # (N, _HLD)
+
+        if self.use_gnn:
+            for _f in self.processor:
+                if isinstance(_f, (GraphConv, APPNP)):
+                    x = _f(x, edgeIdx, edgeAttr)
+                elif isinstance(_f, (SAGEConv, GATConv)):
+                    x = _f(x, edgeIdx)
+                else:
+                    x = _f(x)
+
+        h = x
+        for _f in self.decoder:
+            x = _f(x)
+        if return_hidden:
+            return x, h
+        return x
+
+
+# =====================================================================
+# GNN with CNN encoder on RAW UFM (no AdaptiveAvgPool)
+# =====================================================================
+class GNN_CNN_Raw(torch.nn.Module):
+    """
+    Same training behavior as GNN, but UFM is processed as a raw spatial image
+    (N_stations, C, H, W) through a CNN encoder. UFM is stored as a model buffer
+    (constant per station). For each forward pass, the CNN re-encodes all
+    stations' UFM patches and the resulting per-station embedding is broadcast
+    across the batch graphs.
+
+    Layout assumption:
+      x[:, :other_dim] = WRF + CLMS + UF (other_dim = iDim, since UFM is excluded
+                          from x when POOL_TYPE=raw)
+    Model architecture:
+      ufm_raw (N, C, H, W) → CNN → ufm_emb (N, cnn_out)
+      x (bs*N, other_dim) ↘
+                            concat → encoder → processor → decoder
+      ufm_emb broadcast (bs*N, cnn_out) ↗
+    """
+    def __init__(self, modelPara, all_ufm_raw):
+        """
+        all_ufm_raw : torch.FloatTensor of shape (N_stations, C, H, W)
+        """
+        super().__init__()
+        self.nGNNLayers = modelPara['nGNN']
+        self.nMLPLayers = modelPara['nMLP']
+        self.conv_type = modelPara.get('conv_type', 'graphconv').lower()
+        self.use_gnn = modelPara.get('use_gnn', True)
+        _HLD = modelPara['HLD']
+
+        # UFM as buffer (moves with .to(device))
+        self.register_buffer('all_ufm_raw', all_ufm_raw)
+        self.n_stations = all_ufm_raw.shape[0]
+        ufm_channels = all_ufm_raw.shape[1]
+
+        # Lightweight CNN: aggressively downsample raw 401x401 → 1x1
+        self.cnn_out_dim = modelPara.get('cnn_out_dim', 64)
+        self.cnn_encoder = torch.nn.Sequential(
+            torch.nn.Conv2d(ufm_channels, 16, kernel_size=7, stride=4, padding=3),  # 401→100
+            torch.nn.PReLU(16),
+            torch.nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),             # 100→50
+            torch.nn.PReLU(32),
+            torch.nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),             # 50→25
+            torch.nn.PReLU(64),
+            torch.nn.AdaptiveAvgPool2d(1),                                            # 25→1
+            torch.nn.Flatten(),                                                       # → 64
+        )
+        if self.cnn_out_dim != 64:
+            self.cnn_encoder.append(torch.nn.Linear(64, self.cnn_out_dim))
+            self.cnn_encoder.append(torch.nn.PReLU(self.cnn_out_dim))
+
+        # iDim here is the OTHER features dim (without UFM, since UFM is processed by CNN)
+        # Encoder takes (other + cnn_out) → HLD
+        in_total = modelPara['iDim'] + self.cnn_out_dim
+        _encoder = []
+        for _n in range(self.nMLPLayers):
+            _in = in_total if _n == 0 else _HLD
+            _encoder.append(torch.nn.Linear(_in, _HLD))
+            _encoder.append(torch.nn.PReLU(_HLD))
+        self.encoder = torch.nn.ModuleList(_encoder)
+
+        # Processor
+        _processor = []
+        if self.use_gnn:
+            for _n in range(self.nGNNLayers):
+                if self.conv_type == 'sageconv':
+                    _processor.append(SAGEConv(_HLD, _HLD, aggr='mean'))
+                elif self.conv_type == 'gat':
+                    n_heads = 4
+                    _processor.append(GATConv(_HLD, _HLD // n_heads, heads=n_heads, concat=True))
+                else:
+                    _processor.append(GraphConv(_HLD, _HLD, aggr='mean'))
+                _processor.append(torch.nn.PReLU(_HLD))
+        self.processor = torch.nn.ModuleList(_processor)
+
+        # Decoder
+        _decoder = []
+        for _n in range(self.nMLPLayers):
+            _in = _HLD
+            _out = modelPara['oDim'] if _n == self.nMLPLayers - 1 else _HLD
+            _decoder.append(torch.nn.Linear(_in, _out))
+            if _n < self.nMLPLayers - 1:
+                _decoder.append(torch.nn.PReLU(_out))
+        self.decoder = torch.nn.ModuleList(_decoder)
+
+        # Diagnostic
+        n_params = sum(p.numel() for p in self.parameters())
+        print(f"  [GNN_CNN_Raw] iDim_other={modelPara['iDim']}, "
+              f"UFM=({self.n_stations},{ufm_channels},{all_ufm_raw.shape[2]},{all_ufm_raw.shape[3]})")
+        print(f"  [GNN_CNN_Raw] CNN out_dim={self.cnn_out_dim}, HLD={_HLD}")
+        print(f"  [GNN_CNN_Raw] total params: {n_params}")
+
+    def forward(self, x, edgeIdx, edgeAttr, return_hidden=False):
+        # 1. CNN encode all stations' UFM (re-computed each forward; small cost since N≤500)
+        ufm_emb = self.cnn_encoder(self.all_ufm_raw)            # (N, cnn_out_dim)
+
+        # 2. Broadcast to match batched x
+        # x has shape (bs * n_stations, other_dim) — bs may differ if batch is smaller
+        bs = x.shape[0] // self.n_stations
+        if bs * self.n_stations != x.shape[0]:
+            raise ValueError(f"x.shape[0]={x.shape[0]} not divisible by n_stations={self.n_stations}")
+        ufm_batched = ufm_emb.repeat(bs, 1)                     # (bs*N, cnn_out_dim)
+
+        # 3. Concat
+        x = torch.cat([x, ufm_batched], dim=-1)                 # (bs*N, in_total)
+
+        # 4. Encoder
+        for _f in self.encoder:
+            x = _f(x)
+
+        # 5. GNN processor
+        if self.use_gnn:
+            for _f in self.processor:
+                if isinstance(_f, GraphConv):
+                    x = _f(x, edgeIdx, edgeAttr)
+                elif isinstance(_f, (SAGEConv, GATConv)):
+                    x = _f(x, edgeIdx)
+                else:
+                    x = _f(x)
+
+        # 6. Decoder
+        h = x
+        for _f in self.decoder:
+            x = _f(x)
+        if return_hidden:
+            return x, h
+        return x
+
+
 # 全局标志，确保半监督学习验证只打印一次
 _verification_printed = False
 
@@ -169,9 +428,12 @@ def train(loader,model,lossFn,opt,scheduler,device,nNodes,nNodes_labeled):
             print(f"✓ 无标签节点预测值统计:")
             _yHat_unlabeled = _yHat[~label_mask]
             print(f"   数量: {_yHat_unlabeled.shape[0]}")
-            print(f"   均值: {_yHat_unlabeled.mean().item():.4f}")
-            print(f"   标准差: {_yHat_unlabeled.std().item():.4f}")
-            print(f"   范围: [{_yHat_unlabeled.min().item():.4f}, {_yHat_unlabeled.max().item():.4f}]")
+            if _yHat_unlabeled.numel() > 0:
+                print(f"   均值: {_yHat_unlabeled.mean().item():.4f}")
+                print(f"   标准差: {_yHat_unlabeled.std().item():.4f}")
+                print(f"   范围: [{_yHat_unlabeled.min().item():.4f}, {_yHat_unlabeled.max().item():.4f}]")
+            else:
+                print(f"   (无 unlabeled 节点，跳过统计)")
             
             # 边权重统计
             edge_attr = _batch.edge_attr.cpu().numpy()

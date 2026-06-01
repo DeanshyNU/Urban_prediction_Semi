@@ -642,20 +642,24 @@ def main():
     
     ##----------------------Generate model----------------------
     nEpoch = 5000  # 与FixMatch相同的训练轮数
+    use_gnn = int(os.environ.get('USE_GNN', '1'))  # [Ablation] 0 = pure MLP, no GNN
+    n_gnn = int(os.environ.get('N_GNN', '3'))
     modelParam = {
             'HLD':      128,
             'nMLP':     2,
     #-------------------------GNN part----------------------
-            'nGNN':     3,
+            'nGNN':     n_gnn,
             'nGAT':     1,
             'nHeads':   1,
             'K':        1,
             'iDim':     metadata['iDim'],
             'oDim':     metadata['oDim'],
             'BN':       False,
-            'Dropout':  True,  # 启用dropout
+            'Dropout':  True,
             'conv_type': conv_type,
+            'use_gnn':  bool(use_gnn),  # [Ablation] False = skip GNN processor
     }
+    print(f"  Model: USE_GNN={use_gnn}, N_GNN={n_gnn}")
     modelName = f'geoEmbed_{dataParam["geoMethod"]}_{conv_type}_semi_{dataParam["geoFeatures"]}Geo_{n_unlabeled}unlabeled'
     wandb_name = f'{modelName}_job{job_id}' if job_id else modelName
 
@@ -1012,12 +1016,21 @@ def main():
             _abs_pred = np.array(_abs_pred)
             _abs_truth = np.array(_abs_truth)
             validRMSE_abs = utils.RMSE(_abs_truth, _abs_pred)
+            # 6-metric suite on absolute prediction (RMSE/MBE/MAE × normalized/Celsius)
+            _tgt_scl_C = float(metadata.get('tgt_global_scl', 1.0))
+            valid_metrics_6 = utils.compute_all_metrics(_abs_truth, _abs_pred, scl=_tgt_scl_C)
         else:
             validRMSE_abs = None
+            # When no residual target, use predicted vs truth from the test() output directly
+            _tgt_scl_C = float(metadata.get('tgt_global_scl', 1.0))
+            valid_metrics_6 = utils.compute_all_metrics(_valid_truth, _valid_pred, scl=_tgt_scl_C)
 
         with open(f'{output_dir}/{modelName}_log','a') as f: print("", file=f)
         with open(f'{output_dir}/{modelName}_log','a') as f:
-            log_line = f"Epoch {epoch}: loss {trainLoss:1.4e}/{validLoss:1.4e}; RMSE {trainRMSE[0]:1.3f}/{validRMSE[0]:1.3f}; LR {scheduler.get_last_lr()}"
+            log_line = (f"Epoch {epoch}: loss {trainLoss:1.4e}/{validLoss:1.4e}; "
+                        f"RMSE {trainRMSE[0]:1.3f}/{valid_metrics_6['rmse_norm']:.4f} "
+                        f"({valid_metrics_6['rmse_C']:.3f}°C); "
+                        f"LR {scheduler.get_last_lr()}")
             if residual_target and validRMSE_abs is not None:
                 log_line += f" | abs_RMSE={validRMSE_abs[0]:.3f}"
             if semi_mode in ('laplacian', 'residual_laplacian', 'adaptive_laplacian', 'label_prop', 'graph_signal_recon', 'residual_gsr', 'gsr_conformal'):
@@ -1044,6 +1057,13 @@ def main():
             'valid/rmse_std': validRMSE[1],
             'valid/rmse_min': validRMSE[2],
             'valid/rmse_max': validRMSE[3],
+            # ---- 6-metric suite ----
+            'metrics/rmse_norm': valid_metrics_6['rmse_norm'],
+            'metrics/mbe_norm':  valid_metrics_6['mbe_norm'],
+            'metrics/mae_norm':  valid_metrics_6['mae_norm'],
+            'metrics/rmse_C':    valid_metrics_6['rmse_C'],
+            'metrics/mbe_C':     valid_metrics_6['mbe_C'],
+            'metrics/mae_C':     valid_metrics_6['mae_C'],
             'learning_rate': scheduler.get_last_lr()[0],
             'best_valid_rmse': bestLoss,
         })
@@ -1061,6 +1081,21 @@ def main():
                 'bestLoss':         bestLoss,
                 'hist':             hist,
                 }, chkptPath)
+        # [Debug] Check unlabeled prediction diversity every 500 epochs
+        if epoch % 500 == 0:
+            model.eval()
+            with torch.no_grad():
+                # [BugFix] Clone data to avoid moving original to GPU (breaks DataLoader)
+                _sample = trainLoader.dataset[0].clone().to(device)
+                _pred = model(_sample.x, _sample.edge_index, _sample.edge_attr).squeeze(-1).cpu().numpy()
+                _lm = _sample.label_mask.cpu().numpy()
+                _ul_idx = np.arange(metadata['nNodes_labeled'], metadata['nNodes'])
+                _l_std = _pred[_lm].std()
+                _ul_std = _pred[_ul_idx].std()
+                with open(f'{output_dir}/{modelName}_log','a') as f:
+                    print(f"  [Diversity] labeled_pred_std={_l_std:.4f}, unlabeled_pred_std={_ul_std:.4f}, ratio={_ul_std/(_l_std+1e-8):.2f}", file=f)
+            model.train()
+
         # Plot training history
         hist.append([trainLoss,validLoss,trainRMSE[0],validRMSE[0]])
         utils.plotHist(hist,modelName,output_dir=output_dir)

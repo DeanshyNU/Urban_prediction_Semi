@@ -1,0 +1,27 @@
+=== V3 self-training (confidence=het) ===
+K_PER_ROUND=30, MAX_ROUNDS=15
+BASE_EP=500, ROUND_EP=200 (warm-start)
+τ=0.5, λ_pseudo=0.3, warm_lr=0.0001
+R0 ep   0: train=0.0613  valid=0.0487 (1.683°C)  sup=-2.5842e-01  lap=2.9400e-05
+R0 ep   1: train=0.4012  valid=0.6079 (21.015°C)  sup=2.0393e+01  lap=1.1037e-03
+R0 ep   2: train=0.3280  valid=0.8932 (30.880°C)  sup=1.4700e+01  lap=1.1486e-03
+R0 ep  25: train=0.2499  valid=0.0582 (2.014°C)  sup=4.7549e+00  lap=4.0823e-04
+R0 ep  50: train=0.0541  valid=0.0834 (2.882°C)  sup=-3.7776e-01  lap=7.6805e-04
+R0 ep  75: train=0.0497  valid=0.0575 (1.988°C)  sup=-3.6183e-01  lap=8.7569e-04
+R0 ep 100: train=0.0385  valid=0.0571 (1.975°C)  sup=-5.3256e-01  lap=8.7449e-04
+R0 ep 125: train=0.0375  valid=0.0506 (1.749°C)  sup=-5.2853e-01  lap=8.5160e-04
+R0 ep 150: train=0.0355  valid=0.0499 (1.726°C)  sup=-5.3713e-01  lap=8.8876e-04
+R0 ep 175: train=0.0339  valid=0.0531 (1.837°C)  sup=-5.3578e-01  lap=9.5984e-04
+R0 ep 200: train=0.0334  valid=0.0485 (1.678°C)  sup=-5.4071e-01  lap=1.0194e-03
+R0 ep 225: train=0.0324  valid=0.0487 (1.684°C)  sup=-5.3329e-01  lap=9.4747e-04
+R0 ep 250: train=0.0318  valid=0.0490 (1.696°C)  sup=-5.4367e-01  lap=1.0348e-03
+R0 ep 275: train=0.0320  valid=0.0479 (1.657°C)  sup=-5.2888e-01  lap=9.5858e-04
+R0 ep 300: train=0.0305  valid=0.0476 (1.645°C)  sup=-5.2172e-01  lap=1.1551e-03
+R0 ep 325: train=0.0296  valid=0.0513 (1.774°C)  sup=-5.4799e-01  lap=1.1676e-03
+R0 ep 350: train=0.0315  valid=0.0487 (1.683°C)  sup=-5.4336e-01  lap=8.7376e-04
+R0 ep 375: train=0.0306  valid=0.0482 (1.665°C)  sup=-5.1739e-01  lap=1.1591e-03
+R0 ep 400: train=0.0296  valid=0.0483 (1.669°C)  sup=-5.4069e-01  lap=1.0998e-03
+R0 ep 425: train=0.0284  valid=0.0480 (1.660°C)  sup=-5.5029e-01  lap=1.2301e-03
+R0 ep 450: train=0.0284  valid=0.0481 (1.663°C)  sup=-5.5205e-01  lap=1.2046e-03
+R0 ep 475: train=0.0269  valid=0.0483 (1.669°C)  sup=-5.5619e-01  lap=1.3066e-03
+[R0 done] best=0.0440

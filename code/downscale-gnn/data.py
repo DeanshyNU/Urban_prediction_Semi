@@ -77,10 +77,17 @@ def genGeoFeatures_v2(UrbanFeatureMat, geoMethod='average', poolSize=15, nCompPC
         _norm = np.transpose(_raw, (0, 1, 3, 2))
         _norm = (_norm - _off) / _scl
         _geoFeatures = np.transpose(_norm, (2, 3, 0, 1))
-        # Average pooling
         _geoFeatures = torch.FloatTensor(_geoFeatures)
-        _avgPool = torch.nn.AdaptiveAvgPool2d((poolSize, poolSize))
-        _geoFeatures = _avgPool(_geoFeatures).reshape(_nStations, -1)
+        # POOL_TYPE: avg (default, current behavior) or directional (new)
+        pool_type = os.environ.get('POOL_TYPE', 'avg').lower()
+        if pool_type == 'directional':
+            from utils import directional_pool
+            n_dirs = int(os.environ.get('POOL_DIRS', '4'))
+            _geoFeatures = directional_pool(_geoFeatures, n_dirs=n_dirs)
+            print(f"  [POOL_TYPE=directional] n_dirs={n_dirs}, output dim={_geoFeatures.shape[1]} ({_nFeatures} ch × {n_dirs} dirs)")
+        else:
+            _avgPool = torch.nn.AdaptiveAvgPool2d((poolSize, poolSize))
+            _geoFeatures = _avgPool(_geoFeatures).reshape(_nStations, -1)
 
     elif geoMethod == 'pca':
         # Mean-std normalization
@@ -219,12 +226,12 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False):
     clms_features_norm, clms_off, clms_scl = utils.MinMax(clms_features.copy())
     # Target normalization
     norm_mode = os.environ.get('NORM_MODE', 'per_station').lower()
+    _tgt_global_min = targets.min()
+    _tgt_global_max = targets.max()
+    _tgt_global_scl = _tgt_global_max - _tgt_global_min
+    if _tgt_global_scl == 0:
+        _tgt_global_scl = 1.0
     if norm_mode == 'global':
-        _tgt_global_min = targets.min()
-        _tgt_global_max = targets.max()
-        _tgt_global_scl = _tgt_global_max - _tgt_global_min
-        if _tgt_global_scl == 0:
-            _tgt_global_scl = 1.0
         targets_norm = (targets - _tgt_global_min) / _tgt_global_scl
         tgt_off = np.full(targets.shape[1], _tgt_global_min)
         tgt_scl = np.full(targets.shape[1], _tgt_global_scl)
@@ -380,6 +387,8 @@ def dataGen(dataParam, path, nTrn=0.75, predMode=False):
         'AdjMatrix': Adj,
         'tgt_off': tgt_off,
         'tgt_scl': tgt_scl,
+        'tgt_global_scl': float(_tgt_global_scl),    # for denormalization to Celsius
+        'tgt_global_min': float(_tgt_global_min),
         'eval_mode': eval_mode,
         'valid_station_idx': valid_station_idx,
         'train_station_idx': train_station_idx,

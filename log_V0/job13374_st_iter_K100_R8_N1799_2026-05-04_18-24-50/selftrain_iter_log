@@ -1,0 +1,2 @@
+=== Iterative self-training ===
+N_UNLABELED=1799, K_PER_ROUND=100, MAX_ROUNDS=8, BASE_EP=500, ROUND_EP=500, M=5, T_CYCLE=40, τ=0.5, λ_pseudo=0.5

@@ -1,0 +1,68 @@
+=== Iterative self-training V2 ===
+N_UNLABELED=1799, K_PER_ROUND=50, MAX_ROUNDS=8
+BASE_EP=500, ROUND_EP=200 (warm-start), M_σ=5, T_CYCLE=20
+LR_MAX (σ-snapshots)=5e-04, LR (warm-start)=1e-04
+τ=0.5, λ_pseudo=0.3
+R0 ep   0: train_RMSE=0.0563  valid_RMSE=0.0457 (1.579°C)
+R0 ep   1: train_RMSE=0.0422  valid_RMSE=0.0455 (1.573°C)
+R0 ep   2: train_RMSE=0.0416  valid_RMSE=0.0458 (1.584°C)
+R0 ep  25: train_RMSE=0.0334  valid_RMSE=0.0448 (1.549°C)
+R0 ep  50: train_RMSE=0.0313  valid_RMSE=0.0443 (1.533°C)
+R0 ep  75: train_RMSE=0.0307  valid_RMSE=0.0432 (1.493°C)
+R0 ep 100: train_RMSE=0.0300  valid_RMSE=0.0422 (1.460°C)
+R0 ep 125: train_RMSE=0.0292  valid_RMSE=0.0433 (1.498°C)
+R0 ep 150: train_RMSE=0.0292  valid_RMSE=0.0443 (1.531°C)
+R0 ep 175: train_RMSE=0.0284  valid_RMSE=0.0438 (1.514°C)
+R0 ep 200: train_RMSE=0.0277  valid_RMSE=0.0440 (1.523°C)
+R0 ep 225: train_RMSE=0.0271  valid_RMSE=0.0443 (1.531°C)
+R0 ep 250: train_RMSE=0.0266  valid_RMSE=0.0443 (1.532°C)
+R0 ep 275: train_RMSE=0.0260  valid_RMSE=0.0442 (1.527°C)
+R0 ep 300: train_RMSE=0.0252  valid_RMSE=0.0441 (1.526°C)
+R0 ep 325: train_RMSE=0.0249  valid_RMSE=0.0443 (1.531°C)
+R0 ep 350: train_RMSE=0.0239  valid_RMSE=0.0445 (1.540°C)
+R0 ep 375: train_RMSE=0.0235  valid_RMSE=0.0451 (1.559°C)
+R0 ep 400: train_RMSE=0.0235  valid_RMSE=0.0450 (1.556°C)
+R0 ep 425: train_RMSE=0.0229  valid_RMSE=0.0448 (1.548°C)
+R0 ep 450: train_RMSE=0.0223  valid_RMSE=0.0443 (1.532°C)
+R0 ep 475: train_RMSE=0.0218  valid_RMSE=0.0447 (1.545°C)
+[R0 done] best=0.0422
+R1 ep   0: train=0.0302 valid=0.0427  sup=4.7440e-04 pseudo=2.4953e-05  lap=7.3429e-04
+R1 ep   1: train=0.0298 valid=0.0426  sup=4.6672e-04 pseudo=1.2543e-05  lap=7.5117e-04
+R1 ep   2: train=0.0296 valid=0.0428  sup=4.6036e-04 pseudo=9.4122e-06  lap=7.6962e-04
+R1 ep  25: train=0.0292 valid=0.0439  sup=4.4427e-04 pseudo=9.8758e-06  lap=7.5479e-04
+R1 ep  50: train=0.0290 valid=0.0438  sup=4.3736e-04 pseudo=1.0552e-05  lap=7.8242e-04
+R1 ep  75: train=0.0288 valid=0.0439  sup=4.2981e-04 pseudo=1.3228e-05  lap=7.7182e-04
+R1 ep 100: train=0.0286 valid=0.0440  sup=4.3003e-04 pseudo=1.3341e-05  lap=7.7716e-04
+R1 ep 125: train=0.0284 valid=0.0441  sup=4.2000e-04 pseudo=1.4557e-05  lap=8.0573e-04
+R1 ep 150: train=0.0283 valid=0.0441  sup=4.1363e-04 pseudo=1.5099e-05  lap=7.9022e-04
+R1 ep 175: train=0.0281 valid=0.0440  sup=4.1358e-04 pseudo=1.6344e-05  lap=8.2013e-04
+[R1 done] best=0.0421, init=0.0421, Δ=+0.0000
+R2 ep   0: train=0.0313 valid=0.0442  sup=5.0763e-04 pseudo=1.8618e-04  lap=6.7447e-04
+R2 ep   1: train=0.0307 valid=0.0440  sup=4.9257e-04 pseudo=1.5254e-04  lap=6.3268e-04
+R2 ep   2: train=0.0303 valid=0.0439  sup=4.8314e-04 pseudo=1.3798e-04  lap=6.5181e-04
+R2 ep  25: train=0.0294 valid=0.0444  sup=4.4931e-04 pseudo=6.3953e-05  lap=7.0718e-04
+R2 ep  50: train=0.0291 valid=0.0446  sup=4.3805e-04 pseudo=5.0472e-05  lap=7.1319e-04
+R2 ep  75: train=0.0288 valid=0.0445  sup=4.2868e-04 pseudo=4.5576e-05  lap=7.1084e-04
+R2 ep 100: train=0.0285 valid=0.0445  sup=4.2181e-04 pseudo=3.8778e-05  lap=7.2968e-04
+R2 ep 125: train=0.0284 valid=0.0444  sup=4.1897e-04 pseudo=3.6686e-05  lap=7.2279e-04
+R2 ep 150: train=0.0282 valid=0.0446  sup=4.1332e-04 pseudo=3.3548e-05  lap=7.3507e-04
+R2 ep 175: train=0.0280 valid=0.0444  sup=3.9952e-04 pseudo=3.2003e-05  lap=7.5881e-04
+[R2 done] best=0.0430, init=0.0430, Δ=+0.0000
+R3 ep   0: train=0.0323 valid=0.0448  sup=5.5070e-04 pseudo=2.8295e-04  lap=6.7677e-04
+R3 ep   1: train=0.0314 valid=0.0442  sup=5.0907e-04 pseudo=2.2871e-04  lap=5.9186e-04
+R3 ep   2: train=0.0310 valid=0.0443  sup=4.9523e-04 pseudo=2.0917e-04  lap=6.3895e-04
+R3 ep  25: train=0.0295 valid=0.0452  sup=4.5948e-04 pseudo=9.4294e-05  lap=7.0038e-04
+R3 ep  50: train=0.0291 valid=0.0449  sup=4.5075e-04 pseudo=6.0797e-05  lap=7.1684e-04
+R3 ep  75: train=0.0288 valid=0.0450  sup=4.3620e-04 pseudo=4.7551e-05  lap=7.1799e-04
+R3 ep 100: train=0.0287 valid=0.0447  sup=4.4000e-04 pseudo=3.9232e-05  lap=7.2311e-04
+R3 ep 125: train=0.0284 valid=0.0450  sup=4.1828e-04 pseudo=3.6548e-05  lap=7.5384e-04
+R3 ep 150: train=0.0283 valid=0.0451  sup=4.1269e-04 pseudo=3.4834e-05  lap=7.3399e-04
+R3 ep 175: train=0.0281 valid=0.0449  sup=4.1633e-04 pseudo=3.2996e-05  lap=7.4478e-04
+[R3 done] best=0.0436, init=0.0436, Δ=+0.0000
+
+=== FINAL ===
+R0_best=0.0422, overall=R1=0.0421
+Total pseudo-labels: 175
+  R1: best=0.0421, init=0.0421, |S|=50, target_v=0.0452, σ_avg=0.0435
+  R2: best=0.0430, init=0.0430, |S|=100, target_v=0.0460, σ_avg=0.0449
+  R3: best=0.0436, init=0.0436, |S|=150, target_v=0.0459, σ_avg=0.0450
